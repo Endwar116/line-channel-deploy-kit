@@ -39,4 +39,4 @@ clone https://github.com/Endwar116/line-channel-deploy-kit 到家目錄，
 
 ## 授權與出身
 
-由 IMCC 通道工程實戰迭代而來（bridge v1.12 凍結版）。歡迎自用與改作。
+由多站點實戰部署迭代而來（bridge v1.12 凍結版）。通用版：不綁任何特定站點與人名，所有站點資訊都由安裝參數與設定檔決定。歡迎自用與改作。
