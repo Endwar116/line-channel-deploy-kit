@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.{SLUG}.linebridge</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{PYTHON}</string>
+        <string>{BASE}/tools/line_bridge.py</string>
+        <string>--port</string>
+        <string>{PORT}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>{HOME}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:{HOME}/.local/bin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{HOME}/Library/Logs/{SLUG}-linebridge.log</string>
+    <key>StandardErrorPath</key>
+    <string>{HOME}/Library/Logs/{SLUG}-linebridge.log</string>
+</dict>
+</plist>
