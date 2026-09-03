@@ -24,7 +24,7 @@
 部署歷時 66 分鐘後仍未達成產品所定義之 GREEN 驗收標準（產品宣稱「新機從零到通道活著 ≤ 30 分鐘、
 人類動作 ≤ 6 步」）。實際所需之人類動作已達 7 步以上且流程尚未完成。
 
-過程中確認四項缺陷：
+過程中確認五項缺陷：
 
 | 編號 | 缺陷 | 性質 | 阻斷性 |
 |---|---|---|---|
@@ -32,6 +32,7 @@
 | B | 前置條件清單遺漏 Tailscale Funnel 之兩項必要後台設定 | 文件缺漏 | **是**，第 3 步必然失敗 |
 | C | README 首要承諾之「AI agent 無人值守建置」在主流 agent 預設安全策略下不可執行 | 設計假設 | **是**，第 3 步必然中斷 |
 | D | 缺乏公網可達性驗證步驟，且既有診斷指引在故障時給出假陽性結論 | 文件與診斷設計 | **是**，故障時無法脫困 |
+| E | `empty_mcp.json` 為 `{}`，不合現行 Claude Code schema，所有訊息無條件失敗 | 相容性缺陷 | **是**，核心功能完全不可用 |
 
 四項缺陷共享同一結構性成因：**產品全篇缺乏「外部視角」的驗證機制**。所有驗證步驟均在部署機本機執行，
 而部署機因位於 Tailscale 網路內，其驗證結果與外部服務（LINE 平台）所見之狀態系統性地不一致。
@@ -452,6 +453,113 @@ $ dig @8.8.8.8 A <你的節點>.ts.net
 在一個**必然會發生**的時間窗內，產品提供了兩個都會給出錯誤結論的診斷方法
 （`tailscale funnel status` 假綠燈；本機 curl 假陽性），且未提供任何能給出正確結論的方法。
 部署者除非具備 DNS 除錯經驗並主動查詢權威 NS，否則無法定位問題。
+
+---
+
+### 4.5 缺陷 E — `empty_mcp.json` 格式不相容於現行 Claude Code，導致所有訊息無條件失敗
+
+**嚴重度**：最高（產品核心功能完全不可用）　**阻斷性**：是　**發生步驟**：`AGENT_SETUP.md` 第 8 步（首測）
+
+本缺陷為五項中唯一使產品**核心功能完全無法運作**者。前述四項均為流程或文件問題，
+本項則是：即使部署者克服了 A 至 D 全部障礙、通道完全建立、認主成功，
+**bot 仍無法回覆任何一則訊息**。
+
+#### 4.5.1 現象
+
+通道建立完成、LINE Verify 通過、認主口令成功後，對 bot 發送任何訊息，
+一律收到固定回覆：
+
+```
+（本體呼叫失敗，稍後再試或檢查 line_bridge.log）
+```
+
+#### 4.5.2 證據
+
+```
+2026-09-04T02:53:57+08:00 OWNER_REGISTERED Ua4adbf632c5b059b8ff1ade9f20a43f2
+2026-09-04T02:54:27+08:00 MSG_IN dm:Ua4adbf632c5 owner '那我們要如何開始？'
+2026-09-04T02:54:43+08:00 CONTINUE_MISS rc=1——開新對話 (dm)
+2026-09-04T02:54:47+08:00 CLAUDE_ERROR rc=1 stderr=Error: Invalid MCP configuration:
+                          mcpServers: Does not adhere to MCP server configuration schema
+2026-09-04T02:54:47+08:00 REPLIED len=32
+```
+
+認主流程（`OWNER_REGISTERED`）與訊息接收（`MSG_IN`）皆正常，
+失敗發生在 bridge spawn Claude CLI 的環節。
+
+#### 4.5.3 根因
+
+`install.py` 產生的 MCP 設定檔內容為空物件：
+
+```python
+put(os.path.join(base, "config", "empty_mcp.json"), "{}\n",
+    skip_if_exists=True, label="config/empty_mcp.json")
+```
+
+`core/line_bridge.py` 於每次 spawn 時將此檔以 `--strict-mcp-config` 帶入：
+
+```python
+extra = ["--strict-mcp-config", "--mcp-config",
+         os.path.join(ROOM, "config", "empty_mcp.json")]
+```
+
+現行 Claude Code（實測 2.1.208）要求該設定檔必須具備 `mcpServers` 鍵，
+空物件 `{}` 無法通過 schema 驗證，CLI 以 rc=1 結束。
+由於 bridge 的兩條 spawn 路徑（`-c` 續接與開新對話）使用相同參數，
+**兩條路徑皆必然失敗**，故任何訊息都無法取得回覆。
+
+#### 4.5.4 修復與驗證
+
+將該檔內容改為 `{"mcpServers": {}}` 後實測通過：
+
+```json
+{"type":"result","subtype":"success","is_error":false,
+ "result":"【昱捷助理】\n測試通過","num_turns":1,...}
+```
+
+身分檔（`CLAUDE.md`）亦正確生效，回覆帶有安裝時設定的值台名稱。
+
+#### 4.5.5 影響
+
+1. **產品在現行 Claude Code 版本上完全不可用**。並非部分功能異常或偶發失敗，
+   而是每一則訊息都失敗，且為永久性失敗。
+2. **失敗發生在整個流程的最末端**。部署者需先通過安裝、selftest、金鑰填入、
+   Funnel、webhook Verify、認主等全部環節，才會遭遇此問題。
+   此時所有指標皆顯示成功，部署者極易誤判為「已部署完成」。
+3. **selftest 未涵蓋此路徑**。現行 selftest 檢查 `claude` 指令是否存在
+   （`✅ PASS 指令 claude /Users/jlin/.local/bin/claude`），
+   但未實際 spawn 一次以驗證能否成功執行。此為 selftest 設計上的盲點——
+   它驗證了依賴的**存在**，未驗證依賴的**可用性**。
+4. **錯誤訊息誤導**。「稍後再試」暗示為暫時性問題，將促使部署者反覆重試；
+   實際上此為確定性失敗，重試永遠不會成功。真正的錯誤原因僅存在於 log 中。
+
+#### 4.5.6 修補建議
+
+1. **修正設定檔內容**（必要）：
+
+```python
+# Claude Code 需要 mcpServers 鍵才通得過 schema 驗證；空物件 {} 會被拒
+put(os.path.join(base, "config", "empty_mcp.json"), '{"mcpServers": {}}\n',
+    skip_if_exists=True, label="config/empty_mcp.json")
+```
+
+   注意：因該項使用 `skip_if_exists=True`，既有部署重跑安裝器**不會**修復此問題，
+   需另行提供升級指引或改為版本比對後覆寫。
+
+2. **selftest 增列端到端驗證**（強烈建議）：實際 spawn 一次 Claude CLI，
+   使用與 bridge 完全相同的參數組合，確認 rc=0 且有輸出。
+   此項可在安裝當下攔截本缺陷，而非留到部署者做首測時才爆發。
+
+```python
+r = subprocess.run([claude_bin, "-p", "ok", "--strict-mcp-config",
+                    "--mcp-config", mcp_path, "--output-format", "json"],
+                   capture_output=True, text=True, timeout=120)
+# rc != 0 → FAIL，並將 stderr 前 200 字納入 selftest 輸出
+```
+
+3. **錯誤訊息帶出成因**（建議）：將 stderr 摘要併入回覆，
+   例如「（本體呼叫失敗：Invalid MCP configuration——請檢查 config/empty_mcp.json）」，
+   使部署者無須翻 log 即可定位。
 
 ---
 
