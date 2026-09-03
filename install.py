@@ -213,7 +213,10 @@ def main():
     put(os.path.join(base, "config", "attach_whitelist.txt"),
         "# 附件白名單：每行一個 userId（可先留空；高信任通道另見 kit_config s_tier_channels）\n",
         skip_if_exists=True, label="config/attach_whitelist.txt")
-    put(os.path.join(base, "config", "empty_mcp.json"), "{}\n",
+    # Claude Code 需要 mcpServers 鍵才通得過 schema 驗證；空物件 {} 會被拒：
+    #   Error: Invalid MCP configuration: mcpServers: Does not adhere to MCP server configuration schema
+    # 實測環境 Claude Code 2.1.208（2026-09-04）
+    put(os.path.join(base, "config", "empty_mcp.json"), '{"mcpServers": {}}\n',
         skip_if_exists=True, label="config/empty_mcp.json")
     put(os.path.join(base, "config", "channel_discipline_參考.md"),
         open(os.path.join(KIT, "templates", "channel_discipline.tmpl"), encoding="utf-8").read(),
