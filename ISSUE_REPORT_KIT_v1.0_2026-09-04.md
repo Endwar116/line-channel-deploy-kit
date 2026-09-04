@@ -684,6 +684,86 @@ $ python3 tools/task_verify.py --all
 
 ---
 
+### 4.7 補充發現（部署後續營運期間發現，一併回報）
+
+以下三項發現於通道上線後的實際營運中，雖非阻斷性缺陷，但對維護者有參考價值。
+
+#### G. `claude_bin()` 的版本解析與 selftest 驗證對象不一致——且「修正」它會讓效能倒退
+
+`core/line_bridge.py` 的 `claude_bin()` 以 `shutil.which("claude")` 解析執行檔。
+launchd plist 給定的 PATH 為：
+
+```
+/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:<HOME>/.local/bin
+```
+
+`/usr/local/bin` 排在 `~/.local/bin` 之前，故 bridge 實際執行的是
+`/usr/local/bin/claude`（本案為 2.1.126）。而安裝器 selftest 於使用者 shell 環境執行，
+PATH 順序不同，回報的是 `~/.local/bin/claude`（2.1.208）：
+
+```
+✅ PASS  指令 claude   /Users/jlin/.local/bin/claude     ← selftest 所驗
+實際執行：              /usr/local/bin/claude              ← bridge 所用
+```
+
+**selftest 驗證的不是實際會被執行的那一個。** 此為 4.5.5 所述 selftest 盲點的另一實例。
+
+**但本項不宜逕行「修正」。** 實測同一提示詞於兩版本的表現：
+
+```
+2.1.126   10.3s   輸出   324 tokens
+2.1.208   31.7s   輸出 2,283 tokens
+```
+
+新版思考量約為舊版 7 倍、耗時 3 倍。若為求一致而調整 PATH 或改寫 `claude_bin()`
+指向新版，所有回覆將慢約 3 倍。
+
+**建議**：selftest 應以與 bridge 相同的方式解析（即在 launchd 的 PATH 條件下），
+並將解析結果與版本號一併輸出，讓部署者知道實際會跑哪一個；
+而非逕自統一版本。
+
+#### H. `REPLY_GRACE` 常數已定義但從未被使用
+
+```
+$ grep -n "REPLY_GRACE" core/line_bridge.py
+67:REPLY_GRACE = 45          # v1.11 讓渡 replyToken 後的保底秒數（LINE token 時效約 60s）
+（僅此一處）
+```
+
+而 `docs/迭代史摘要.md` v1.11 條目載明「**45s watchdog 保底**」。
+文件描述的 watchdog 機制在程式碼中不存在，僅留下一個未被引用的常數。
+
+實務影響：本案曾出現單次回應耗時 212.9 秒的情形，
+若 `send_reply` 因 token 過期失敗，僅能倚賴既有的 push fallback（吃月額度），
+沒有任何機制在接近 60 秒時提前處置。
+
+**建議**：實作該 watchdog，或移除常數並修正迭代史摘要的描述——
+兩者擇一，避免文件與程式碼不一致。
+
+#### I. 建議：格式限制應在出口強制，而非倚賴模型自律
+
+`templates/CLAUDE.md.tmpl` 的「LINE 排版鐵則」明文禁止 markdown
+（「LINE 不渲染粗體/標題/表格，星號井號全是雜訊」）。
+
+本案實測發現此規則**無法穩定遵守**。即使將該段改寫為附禁用字元清單
+與「送出前自檢」步驟的硬性規則，回覆仍持續出現 `**粗體**`：
+
+```
+【昱捷助理】產投（產業人才投資計畫）是給**在職勞工**的補助課程，
+```
+
+推測原因：markdown 排版是模型的既有傾向，屬於提示詞難以穩定壓制的行為。
+
+**機械性的格式限制不應倚賴模型自律。** 本案的處置是在 `send_reply` 與
+`send_push` 這唯一出口加入 `strip_markdown()`，做確定性後處理：
+移除 `**粗體**`、標題符號、引言符號、行內反引號與 ``` 圍籬，
+項目符號轉為「・」，並保留網址中的底線、數字編號與單顆星號（乘號）。
+
+建議 KIT 內建此類出口處理。這比在身分檔中反覆加強措辭可靠得多，
+且對所有部署者一體適用。
+
+---
+
 ## 5. 綜合討論
 
 ### 5.1 四項缺陷的共同結構
