@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""line_bridge.py — LINE 通道接收站 v1.12（LINE_CHANNEL_DEPLOY_KIT v1.0）
+"""line_bridge.py — LINE 通道接收站 v1.13（LINE_CHANNEL_DEPLOY_KIT v1.0）
 
 架構：LINE 平台 --webhook--> 本站（驗簽→白名單→claude -p）--reply--> 主人
 零第三方依賴：只用 python3 標準庫（http.server / hmac / urllib）——
@@ -37,7 +37,9 @@ import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.12"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
+from claude_failure import classify_failure   # 額度/未知失敗分類（純函式，同目錄）
+
+VERSION = "1.13"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
 ROOM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -71,6 +73,7 @@ CMD_RE = re.compile(r"^(任務_他家agent|任務|本體)[：:\s]")   # 口令�
 MENTION_RE = re.compile(r"^(\s*@\S+\s*)+")    # 群組裡 @bot 前綴——剝掉再判口令（2026-08-14 實故障：@擋住口令）
 REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 PUSH_URL = "https://api.line.me/v2/bot/message/push"
+LOADING_URL = "https://api.line.me/v2/bot/chat/loading/start"   # 輸入中動畫（免費，不吃額度；僅一對一）
 # ── v1.9 附件與連結（主人 2026-08-16 13:59 裁定：白名單=主人+成員；檔案只認任務訊息點名的檔名；
 #    連結第一閘不點開只做靜態分析；相關規範=房 LINE通道_技術檔案/v1.9規格_附件與連結.md）──
 ATTACH_WHITELIST = os.path.join(ROOM, "config", "attach_whitelist.txt")   # 每行一個 userId
@@ -82,6 +85,23 @@ ATTACH_MAX_BYTES = 20 * 1024 * 1024
 # S 級通道（祖檔§十三）的 file/audio 免白名單免點名制：最高信任級的通道不該讓成員吃「未指明，不會收」。
 # 可執行黑名單與 20MB 上限**不隨豁免撤除**（安全層與信任分級是兩回事）。
 S_TIER_ATTACH_OK = set(CFG.get("s_tier_channels", []))   # 高信任通道集合；預設空=全部照白名單/點名制
+# 附件開放通道（2026-09-05 新增，與 s_tier_channels 分離）：
+# 原本 s_tier_channels 一鍵兩用——line_bridge 當它是「信任高→附件放寬」，
+# relay_say 當它是「職場敏感→本體禁止發言」，語意相反。
+# 把附件信任拆出來，才能「群組可傳檔」同時「本體仍能在該群組回報」。
+ATTACH_OPEN = set(CFG.get("attach_open_channels", []))
+# 主人在「任何」通道都能傳檔（2026-09-06 修）。
+# 原本是把當下存在的群組 ID 寫死進 attach_open_channels，結果每開一個新群組
+# 就要手動加一次——主人不會記得，本體也不會知道，檔案就靜默被拒。
+# 主人是這套系統裡信任層級最高的身分，用通道白名單限制他沒有意義。
+# 訪客仍受限：要嘛通道在 attach_open_channels 且 owner_only=False，
+# 要嘛該 uid 在 attach_open_uids。
+ATTACH_OPEN_ALL_FOR_OWNER = bool(CFG.get("attach_open_all_for_owner", True))
+# 群組免點名只給主人：不然群組任一成員都能把檔案丟進主人的電腦。
+ATTACH_OPEN_OWNER_ONLY = bool(CFG.get("attach_open_owner_only", True))
+# 例外名單：owner_only 模式下，額外放行的特定 uid（經主人明示同意的協作者）。
+# 比整個關掉 owner_only 精確——只放行點名的人，不是整個群組所有成員。
+ATTACH_OPEN_UIDS = set(CFG.get("attach_open_uids", []))
 MEDIA_INCOMING = os.path.join(ROOM, "media", "incoming")   # S 級豁免收件區（部署態=~/.{slug}/media/incoming，目錄自建）
 ATTACH_DENY_EXT = {"exe", "bat", "cmd", "sh", "command", "scpt", "app", "dmg", "pkg", "jar", "js", "vbs", "ps1"}
 EXPECT_TTL_SEC = 1800
@@ -143,15 +163,71 @@ def line_api(url, payload):
         return r.status
 
 
+def strip_markdown(text):
+    """出口攔截：LINE 不渲染 markdown，星號井號會變成字面雜訊。
+
+    身分檔已明文禁止 markdown，但實測仍會漏（2026-09-04：規則寫成硬條列＋
+    送出前自檢，回覆照樣帶 **粗體**）。機械性的格式限制不該靠模型自律，
+    在唯一的出口做確定性處理。
+
+    保守處理：只動明確是 markdown 語法的部分，不碰網址、不碰單顆星號
+    （可能是乘號或顏文字），不碰數字編號（1. 在 LINE 上本來就讀得懂）。
+    """
+    if not text:
+        return text
+    out = []
+    in_fence = False
+    for line in text.split("\n"):
+        st = line.strip()
+        # ``` 圍籬整行拿掉（內容保留）
+        if st.startswith("```"):
+            in_fence = not in_fence
+            continue
+        # 水平分隔線 → 空行
+        if re.fullmatch(r"[-*_]{3,}", st):
+            out.append("")
+            continue
+        # 標題符號
+        line = re.sub(r"^\s*#{1,6}\s+", "", line)
+        # 引言符號
+        line = re.sub(r"^\s*>\s?", "", line)
+        # 項目符號 → 中文慣用的實心點
+        line = re.sub(r"^(\s*)[-*+]\s+", r"\1・", line)
+        out.append(line)
+    text = "\n".join(out)
+    # 粗體與底線粗體（非貪婪，跨不了行）
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    # 行內程式碼的反引號
+    text = re.sub(r"`([^`\n]+)`", r"\1", text)
+    # 連續三個以上空行收斂成兩個
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def send_reply(reply_token, text):
     return line_api(REPLY_URL, {"replyToken": reply_token,
-                                "messages": [{"type": "text", "text": text[:4900]}]})
+                                "messages": [{"type": "text",
+                                              "text": strip_markdown(text)[:4900]}]})
 
 
 def send_push(uid, text):
     # push 吃免費額度（台灣輕用量 200 則/月）——只在 reply token 過期時退而用之
     return line_api(PUSH_URL, {"to": uid,
-                               "messages": [{"type": "text", "text": text[:4900]}]})
+                               "messages": [{"type": "text",
+                                             "text": strip_markdown(text)[:4900]}]})
+
+
+def start_loading(uid, seconds=20):
+    """LINE 輸入中動畫——讓主人知道值台在想，不是掛了。
+    免費、不吃 push 額度、不消耗 replyToken；**僅支援一對一聊天**，群組會被 API 拒絕。
+    seconds 必須是 5~60 的 5 倍數。取 20——動畫消失後仍沒回覆＝出事了，
+    這比設上限 60 讓人對著假動畫乾等更誠實。
+    任何失敗都吞掉：這只是體驗優化，不能拖累回覆主流程。"""
+    try:
+        line_api(LOADING_URL, {"chatId": uid, "loadingSeconds": seconds})
+    except Exception as e:
+        log(f"LOADING_SKIP {type(e).__name__}")
 
 
 def claude_bin():
@@ -318,7 +394,26 @@ def is_mentioned(ev, text):
     return False
 
 
-CLAUDE_LOCK = threading.Lock()   # 一次只跑一個 claude（2026-08-14 實故障：並發疊加+API過載→240s逾時）
+# 併發控制（2026-09-04 改）：原本是單一全域鎖「一次只跑一個 claude」，
+# 起因是 2026-08-14 實故障（並發疊加＋API 過載→240s 逾時）。
+# 但實測發現副作用更嚴重：私訊一個慢請求（跑了 212s）會把所有群組訊息卡死排隊，
+# 排隊超過 60 秒 replyToken 就過期，退 push 吃額度；重啟則直接遺失。
+# 改成兩層——
+#   ① 每通道一把鎖：同一通道不並行（保護 -c 的對話接續不被交錯破壞）
+#   ② 全域信號量：總併發上限 3，仍然防住原本那個 API 過載問題
+_LOCKS_GUARD = threading.Lock()
+_CHANNEL_LOCKS = {}
+CLAUDE_SEM = threading.Semaphore(3)
+
+
+def channel_lock(key):
+    """取得該通道專屬的鎖；第一次用到才建立。"""
+    with _LOCKS_GUARD:
+        lk = _CHANNEL_LOCKS.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _CHANNEL_LOCKS[key] = lk
+        return lk
 _SEEN_EVENTS = []                # v1.6 webhookEventId 去重（防 replay/重投遞），上限 500
 _RATE = {}                       # v1.6 uid -> [ts,...] 滑動窗
 
@@ -389,7 +484,7 @@ def _parse_result_json(stdout):
     return data["result"], meter
 
 
-def ask_claude(text, ctype="dm", cid="unknown"):
+def ask_claude(text, ctype="dm", cid="unknown", allow_web=False):
     if os.environ.get("TEST_MODE"):
         return f"[TEST_MODE echo] {ctype}:{text}"
     cwd = chat_dir_for(ctype, cid)
@@ -397,10 +492,20 @@ def ask_claude(text, ctype="dm", cid="unknown"):
     extra = ["--strict-mcp-config", "--mcp-config", os.path.join(ROOM, "config", "empty_mcp.json")]
     # token 監測（v1）：stdout 變 JSON（result=回覆文字＋usage 計量），
     # 一定放 extra 尾端，維持「text 緊跟 -p」的既有防呆順序
+    # 網頁閱讀權限（2026-09-04 主人指示開通）：只給主人，訪客一律不給。
+    # 用 --allowedTools 預先核可，避免非互動模式下無法授權而被拒。
+    # 注意：分身的檔案存取本來就被 Claude Code 的 cwd 沙箱限制在自己的通道目錄，
+    # 金鑰檔與其他通道的 history 皆讀不到（2026-09-04 實測驗證）。
+    # 只給 WebFetch（讀指定網址，快且有界）。
+    # 不給 WebSearch——開放式搜尋會跑好幾分鐘，而 CLAUDE_LOCK 是全域鎖，
+    # 一個慢請求會把所有通道卡住，排隊超過 60 秒 reply token 就過期、退 push 吃額度。
+    # 需要研究的走「任務」給本體，本體沒有回覆時效壓力。（2026-09-04 實故障後收斂）
+    if allow_web:
+        extra += ["--allowedTools", "WebFetch"]
     extra += ["--output-format", "json"]
     t0 = time.monotonic()
     try:
-        with CLAUDE_LOCK:
+        with channel_lock(f"{ctype}:{cid}"), CLAUDE_SEM:
             # stdin 接 /dev/null：排除任何等輸入的吊死路徑
             # -c 接續「同目錄」最近一次對話；第一次（無可續）失敗→開新對話
             # text 必須緊跟 -p、放在 --add-dir 前——add-dir 是變長參數會吞位置參數
@@ -445,8 +550,15 @@ def ask_claude(text, ctype="dm", cid="unknown"):
         entry["parse_miss"] = True
     _meter_append(entry)
     if r.returncode != 0 or not out:
-        log(f"CLAUDE_ERROR rc={r.returncode} stderr={(r.stderr or '')[:200]}")
-        return "（本體呼叫失敗，稍後再試或檢查 line_bridge.log）"
+        # 額度用盡時 CLI 以 rc=1 結束、stderr 空白，原因只在 stdout JSON 的 result 欄
+        # （2026-09-10→13 實故障：8 則全記成 stderr= 空白，主人問「沒額度了嗎」也答不出來）。
+        # 用 out/raw 分類，並把 out_head 記進 log，日後看得出真因。
+        kind, reply = classify_failure(r.returncode, out or raw, r.stderr or "",
+                                       is_error=bool(meter.get("is_error")),
+                                       owner=OWNER_NAME)
+        log(f"CLAUDE_ERROR rc={r.returncode} kind={kind} "
+            f"stderr={(r.stderr or '')[:120]} out_head={(out or raw or '')[:120]!r}")
+        return reply
     return out
 
 
@@ -555,7 +667,12 @@ def handle_attachment(ev, ctype, cid):
     mtype, mid = msg.get("type"), msg.get("id", "")
     # v1.12 S 級豁免：S 級通道的 file/audio 不過白名單/點名閘（危險副檔名與 20MB 上限照舊），
     # 收進 MEDIA_INCOMING＋log ATTACH_SAVED＋照常入 task 流（本體即時知道；內容一律當資料讀）
-    if cid in S_TIER_ATTACH_OK and mtype in ("file", "audio"):
+    _is_owner = uid in owner_ids()
+    _open_ok = (cid in S_TIER_ATTACH_OK
+                or (ATTACH_OPEN_ALL_FOR_OWNER and _is_owner)
+                or (cid in ATTACH_OPEN and (not ATTACH_OPEN_OWNER_ONLY
+                                            or _is_owner or uid in ATTACH_OPEN_UIDS)))
+    if _open_ok and mtype in ("file", "audio"):
         s_fname = (msg.get("fileName") or "").strip()
         if mtype == "file":
             s_ext = norm_name(s_fname).rsplit(".", 1)[-1] if "." in s_fname else ""
@@ -568,6 +685,20 @@ def handle_attachment(ev, ctype, cid):
             save_name = f"{mid}.m4a"   # LINE 語音訊息容器=m4a
         os.makedirs(MEDIA_INCOMING, exist_ok=True)
         dest = os.path.join(MEDIA_INCOMING, save_name)
+        # 同名檔案已存在＝先前收過了。直接回報，不要試著覆寫——
+        # 落盤的檔案是 444 唯讀（檔案=資料不是指令），覆寫會拿到
+        # [Errno 13] Permission denied，那個訊息看起來像權限沒設好，
+        # 實際上是重複傳送，會讓人往錯的方向查。（2026-09-07 實故障）
+        if os.path.exists(dest):
+            _sz = os.path.getsize(dest)
+            log(f"ATTACH_DUP {uid[:8]} {save_name!r} 已存在 {_sz}B，不重複收")
+            try:
+                send_reply(ev["replyToken"],
+                           f"「{save_name}」先前已經收過了（{_sz//1024}KB），不用再傳。\n"
+                           f"要換成新版本的話，請改個檔名再傳。")
+            except Exception:
+                pass
+            return
         try:
             env = load_secrets()
             req = urllib.request.Request(CONTENT_URL % mid,
@@ -799,8 +930,12 @@ def handle_event(ev):
     if _relay:
         prompt = (f"（本體托你帶話給主人。請在你的回覆**最前面**原樣轉達下面這段，"
                   f"標明是本體說的，轉達完再寫你自己的回應）\n{_relay}\n（帶話結束）\n\n" + prompt)
+    # 輸入中動畫：值台思考期間（實測中位 4~14 秒）畫面不會一片死寂。
+    # 只在一對一通道——LINE 的 loading API 不支援群組。
+    if ctype == "dm":
+        start_loading(cid)
     try:
-        answer = ask_claude(prompt, ctype, cid)
+        answer = ask_claude(prompt, ctype, cid, allow_web=is_owner)
     except subprocess.TimeoutExpired:
         log("ASK_CLAUDE_TIMEOUT")
         answer = "我想太久被系統斷線了，可能是 Anthropic 端塞車。\n這句可以再傳一次，或改用「任務」開頭讓本體接手。"
