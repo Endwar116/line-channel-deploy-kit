@@ -8,7 +8,8 @@
   參數未給且在互動終端 → 逐項問；非互動缺參數 → 印用法退出。
 
 做的事（全部只動 ~/.{slug}/ 與 ~/Library/LaunchAgents/，絕不碰其他目錄）：
-  1. 展開 core/ 工具 → ~/.{slug}/tools/（bridge＋relay_say＋line_push＋task_verify＋queue_backlog_check）
+  1. 展開 core/ 工具 → ~/.{slug}/tools/（bridge＋claude_failure＋relay_say＋line_push＋task_verify
+     ＋queue_backlog_check），測試 → ~/.{slug}/tools/tests/（裝完可自行 unittest 覆驗）
   2. 生成 config/kit_config.json（身分參數單一真源）＋queue_hmac.key（隨機生成，600）
   3. 展開 templates/ → 身分檔 CLAUDE.md（{AGENT_NAME}/{OWNER_NAME} 代入）＋secrets 空殼（600）
      ＋member_alias.json＋attach_whitelist.txt＋通道專屬段參考
@@ -185,12 +186,22 @@ def main():
             sys.exit("中止（未動任何檔案）")
 
     # ── ① 目錄與 core ──
-    for d in ("tools", "config/secrets", "LOG", "chats", "attachments", os.path.join("media", "incoming")):
+    for d in ("tools", os.path.join("tools", "tests"), "config/secrets", "LOG", "chats",
+              "attachments", os.path.join("media", "incoming")):
         os.makedirs(os.path.join(base, d), exist_ok=True)
     print("展開：")
-    for f in ("line_bridge.py", "relay_say.py", "line_push.py", "task_verify.py", "queue_backlog_check.py"):
+    # claude_failure.py 是 line_bridge 的頂層 import（from claude_failure import classify_failure）。
+    # 漏掉它 bridge 會 ImportError 死在啟動，不是功能降級——名單少一個檔就是整站不起來。
+    for f in ("line_bridge.py", "claude_failure.py", "relay_say.py", "line_push.py",
+              "task_verify.py", "queue_backlog_check.py"):
         put(os.path.join(base, "tools", f), open(os.path.join(KIT, "core", f), encoding="utf-8").read(),
             label=f"tools/{f}")
+    # 測試隨工具一起出貨：裝完可用 `cd ~/.{slug}/tools && python3 -m unittest discover -s tests`
+    # 自證額度分類真的接在 bridge 上，不必只信 selftest 的 GREEN 字樣。
+    for f in ("test_claude_failure.py", "test_bridge_limit_wiring.py"):
+        put(os.path.join(base, "tools", "tests", f),
+            open(os.path.join(KIT, "core", "tests", f), encoding="utf-8").read(),
+            label=f"tools/tests/{f}")
 
     # ── ② config ──
     cfg = {"owner_name": owner, "agent_name": agent,
@@ -213,7 +224,10 @@ def main():
     put(os.path.join(base, "config", "attach_whitelist.txt"),
         "# 附件白名單：每行一個 userId（可先留空；高信任通道另見 kit_config s_tier_channels）\n",
         skip_if_exists=True, label="config/attach_whitelist.txt")
-    put(os.path.join(base, "config", "empty_mcp.json"), "{}\n",
+    # Claude Code 需要 mcpServers 鍵才通得過 schema 驗證；空物件 {} 會被拒：
+    #   Error: Invalid MCP configuration: mcpServers: Does not adhere to MCP server configuration schema
+    # 實測環境 Claude Code 2.1.208（2026-09-04）
+    put(os.path.join(base, "config", "empty_mcp.json"), '{"mcpServers": {}}\n',
         skip_if_exists=True, label="config/empty_mcp.json")
     put(os.path.join(base, "config", "channel_discipline_參考.md"),
         open(os.path.join(KIT, "templates", "channel_discipline.tmpl"), encoding="utf-8").read(),
