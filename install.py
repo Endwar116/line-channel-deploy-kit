@@ -23,6 +23,7 @@
 """
 import argparse
 import base64
+import glob
 import hashlib
 import hmac
 import json
@@ -176,7 +177,7 @@ def main():
     plist_p = os.path.join(plist_dir, f"com.{slug}.linebridge.plist")
 
     print(f"\n安裝計畫：owner={owner} agent={agent} slug={slug} port={port}")
-    print(f"  ① core 工具 5 支 → {base}/tools/")
+    print(f"  ① core 工具 6 支＋測試 → {base}/tools/")
     print(f"  ② config（kit_config.json＋queue_hmac.key＋member_alias＋attach_whitelist＋empty_mcp）")
     print(f"  ③ 身分檔 → {base}/CLAUDE.md（既有不覆蓋）；secrets 空殼 → config/secrets/（既有不覆蓋）")
     print(f"  ④ launchd → {plist_p}" + ("（--skip-launchd：跳過）" if a.skip_launchd else "＋launchctl load"))
@@ -197,8 +198,11 @@ def main():
         put(os.path.join(base, "tools", f), open(os.path.join(KIT, "core", f), encoding="utf-8").read(),
             label=f"tools/{f}")
     # 測試隨工具一起出貨：裝完可用 `cd ~/.{slug}/tools && python3 -m unittest discover -s tests`
-    # 自證額度分類真的接在 bridge 上，不必只信 selftest 的 GREEN 字樣。
-    for f in ("test_claude_failure.py", "test_bridge_limit_wiring.py"):
+    # 自證核心行為真的接在 bridge 上，不必只信 selftest 的 GREEN 字樣。
+    # 用 glob 而非寫死名單——寫死的話每加一個測試就要記得改這裡，
+    # 跟當初漏掉 claude_failure.py 是同一類錯誤，而且漏了不會有任何徵兆。
+    for f in sorted(os.path.basename(p) for p in
+                    glob.glob(os.path.join(KIT, "core", "tests", "*.py"))):
         put(os.path.join(base, "tools", "tests", f),
             open(os.path.join(KIT, "core", "tests", f), encoding="utf-8").read(),
             label=f"tools/tests/{f}")

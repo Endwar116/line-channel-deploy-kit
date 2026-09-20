@@ -38,6 +38,15 @@ def _fake_run_limit(*a, **k):
 class BridgeLimitWiring(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        # 隔離正式狀態：ask_claude 會讀寫 profile 冷卻檔，不隔離的話跑一次測試
+        # 就把真的帳號標記冷卻 30 分鐘，等於用測試把線上值台打瘸。
+        for target, value in (("CLAUDE_PROFILES", []),
+                              ("PROFILE_COOLDOWN_PATH",
+                               os.path.join(self.tmp, "profile_cooldown.json")),
+                              ("LOG_FILE", os.path.join(self.tmp, "test.log"))):
+            p = mock.patch.object(lb, target, value)
+            p.start()
+            self.addCleanup(p.stop)
 
     def test_ask_claude_returns_limit_reply_on_quota_exhaustion(self):
         with mock.patch.object(lb.subprocess, "run", _fake_run_limit), \

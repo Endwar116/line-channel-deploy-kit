@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""line_bridge.py — LINE 通道接收站 v1.13（LINE_CHANNEL_DEPLOY_KIT v1.0）
+"""line_bridge.py — LINE 通道接收站 v1.14（LINE_CHANNEL_DEPLOY_KIT v1.0）
 
 架構：LINE 平台 --webhook--> 本站（驗簽→白名單→claude -p）--reply--> 主人
 零第三方依賴：只用 python3 標準庫（http.server / hmac / urllib）——
@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from claude_failure import classify_failure   # 額度/未知失敗分類（純函式，同目錄）
 
-VERSION = "1.13"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
+VERSION = "1.14"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
 ROOM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -61,6 +61,15 @@ LOG_FILE = os.path.join(ROOM, "LOG", "line_bridge.log")
 REGISTER_PHRASE = CFG.get("register_phrase", "我是" + OWNER_NAME)   # 認主口令（TOFU 註冊）
 CLAUDE_TIMEOUT = 240
 CHAT_MODEL = CFG.get("chat_model", "sonnet")   # 值台聊天用腦（省額度）；任務走本體不受此限
+# 帳號 failover（2026-09-20 新增）：撞額度時自動換下一個 Claude 設定目錄。
+# 清單每項是一個 CLAUDE_CONFIG_DIR；"" ＝預設帳號（移除該變數，見 profile_env）。
+# **預設空清單＝完全不 failover**，行為與本功能加入前逐字相同——出貨的 kit 不受影響，
+# 只有在 kit_config.json 明確填了才啟用。
+CLAUDE_PROFILES = CFG.get("claude_profiles", [])
+# 撞額度後多久不再試該 profile。用固定值而非 CLI 回報的 reset 時間：
+# 2026-09-19 實測確認那個時間不可信（log 說隔天 15:00，實際當天凌晨就恢復了）。
+PROFILE_COOLDOWN_SEC = int(CFG.get("profile_cooldown_sec", 1800))
+PROFILE_COOLDOWN_PATH = os.path.join(ROOM, "LOG", "profile_cooldown.json")
 TASK_QUEUE = os.path.join(ROOM, "LOG", "task_queue.jsonl")   # 「任務：」升級佇列，本體 Monitor 盯著
 TOKEN_METER = os.path.join(ROOM, "LOG", "token_meter.jsonl")   # v1.8 訪客任務#1（成員）：每次 CLI spawn 計量
 CHATS_DIR = os.path.join(ROOM, "chats")   # v1.3 通道隔離：每個通道一個目錄＝獨立對話記憶（防私訊內容漏進群組）
@@ -406,6 +415,65 @@ _CHANNEL_LOCKS = {}
 CLAUDE_SEM = threading.Semaphore(3)
 
 
+def available_profiles(profiles, cooldown, now_ts):
+    """回還能用的 profile（保持設定順序）；全部冷卻中回 []。
+
+    profiles 為空＝沒設定 failover，回 [None]＝照舊跑一次、沿用現有環境。
+    cooldown 裡不認識的 key 一律忽略（設定改過之後留下的舊紀錄）。
+    """
+    if not profiles:
+        return [None]
+    return [p for p in profiles if cooldown.get(p or "", 0) <= now_ts]
+
+
+def profile_env(profile):
+    """該 profile 要用的環境。
+
+    None ＝沒設定 failover：一個位元組都不改，維持本功能加入前的行為。
+    ""   ＝清單裡的「預設帳號」：主動**移除** CLAUDE_CONFIG_DIR。
+           不沿用繼承值——若外層（例如 CMax）已把它指向清單裡的另一項，兩項會
+           指到同一個帳號，failover 空轉卻從 log 看不出來。
+           也不能改設成 ~/.claude——2026-09-20 實測：這個變數沒設時 CLI 讀
+           ~/.claude.json ＋Keychain，明確指向 ~/.claude 後改找
+           ~/.claude/.claude.json（不存在）→ "Not logged in"。
+           預設帳號無法用一個路徑表達，只能靠「不設」。
+    其他  ＝展開後設為該目錄。
+    """
+    env = os.environ.copy()
+    if profile is None:
+        return env
+    if profile:
+        env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(profile)
+    else:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    return env
+
+
+def load_profile_cooldown():
+    try:
+        with open(PROFILE_COOLDOWN_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return {k: float(v) for k, v in d.items()}
+    except Exception:
+        return {}
+
+
+def mark_profile_cooldown(profile, now_ts=None, sec=None):
+    """把該 profile 標記為冷卻中，回寫後的整份 cooldown。"""
+    now_ts = time.time() if now_ts is None else now_ts
+    sec = PROFILE_COOLDOWN_SEC if sec is None else sec
+    cd = load_profile_cooldown()
+    cd[profile or ""] = now_ts + sec
+    try:
+        tmp = PROFILE_COOLDOWN_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cd, f)
+        os.replace(tmp, PROFILE_COOLDOWN_PATH)
+    except Exception as e:
+        log(f"PROFILE_COOLDOWN_WRITE_FAILED {type(e).__name__}: {e}")
+    return cd
+
+
 def channel_lock(key):
     """取得該通道專屬的鎖；第一次用到才建立。"""
     with _LOCKS_GUARD:
@@ -484,6 +552,19 @@ def _parse_result_json(stdout):
     return data["result"], meter
 
 
+def _is_limit_result(r):
+    """這次失敗是不是「訂閱額度用盡」。
+
+    額度訊息在 stdout 的 JSON result 欄，不在 stderr——沿用 claude_failure 的判定，
+    不要在這裡另寫一套字串比對，否則兩處會漸漸走鐘。
+    """
+    raw = (r.stdout or "").strip()
+    parsed = _parse_result_json(raw) if raw else None
+    kind, _ = classify_failure(r.returncode, (parsed[0].strip() if parsed else raw),
+                               r.stderr or "")
+    return kind == "limit"
+
+
 def ask_claude(text, ctype="dm", cid="unknown", allow_web=False):
     if os.environ.get("TEST_MODE"):
         return f"[TEST_MODE echo] {ctype}:{text}"
@@ -504,21 +585,42 @@ def ask_claude(text, ctype="dm", cid="unknown", allow_web=False):
         extra += ["--allowedTools", "WebFetch"]
     extra += ["--output-format", "json"]
     t0 = time.monotonic()
+    profiles = available_profiles(CLAUDE_PROFILES, load_profile_cooldown(), time.time())
+    if not profiles:
+        # 全部冷卻中仍試第一個：冷卻是「省掉必敗的 33 秒等待」的啟發，不是硬閘門。
+        # 額度可能提前恢復（CLI 回報的 reset 時間實測不可信），硬擋會讓整個冷卻期
+        # 都不回話——寧可偶爾多花一次失敗，也不要明明能用卻裝死。
+        profiles = [(CLAUDE_PROFILES or [None])[0]]
+        log("PROFILE_ALL_COOLING——仍試第一個")
     try:
         with channel_lock(f"{ctype}:{cid}"), CLAUDE_SEM:
-            # stdin 接 /dev/null：排除任何等輸入的吊死路徑
-            # -c 接續「同目錄」最近一次對話；第一次（無可續）失敗→開新對話
-            # text 必須緊跟 -p、放在 --add-dir 前——add-dir 是變長參數會吞位置參數
-            r = subprocess.run(
-                [claude_bin(), "-p", text, "-c", "--model", CHAT_MODEL] + extra,
-                cwd=cwd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
-                stdin=subprocess.DEVNULL)
-            if r.returncode != 0:
-                log(f"CONTINUE_MISS rc={r.returncode}——開新對話 ({ctype})")
+            for prof in profiles:
+                env = profile_env(prof)
+                # stdin 接 /dev/null：排除任何等輸入的吊死路徑
+                # -c 接續「同目錄」最近一次對話；第一次（無可續）失敗→開新對話
+                # text 必須緊跟 -p、放在 --add-dir 前——add-dir 是變長參數會吞位置參數
                 r = subprocess.run(
-                    [claude_bin(), "-p", text, "--model", CHAT_MODEL] + extra,
+                    [claude_bin(), "-p", text, "-c", "--model", CHAT_MODEL] + extra,
                     cwd=cwd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
-                    stdin=subprocess.DEVNULL)
+                    stdin=subprocess.DEVNULL, env=env)
+                if r.returncode != 0:
+                    if _is_limit_result(r):
+                        # 同帳號重跑必然同樣撞額度——直接換下一個，不白花那 33 秒
+                        mark_profile_cooldown(prof)
+                        log(f"PROFILE_LIMITED {prof or '(預設)'}"
+                            f"——冷卻 {PROFILE_COOLDOWN_SEC}s，換下一個")
+                        continue
+                    log(f"CONTINUE_MISS rc={r.returncode}——開新對話 ({ctype})")
+                    r = subprocess.run(
+                        [claude_bin(), "-p", text, "--model", CHAT_MODEL] + extra,
+                        cwd=cwd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
+                        stdin=subprocess.DEVNULL, env=env)
+                    if r.returncode != 0 and _is_limit_result(r):
+                        mark_profile_cooldown(prof)
+                        log(f"PROFILE_LIMITED {prof or '(預設)'}"
+                            f"——冷卻 {PROFILE_COOLDOWN_SEC}s，換下一個")
+                        continue
+                break
     except subprocess.TimeoutExpired:
         # 逾時也留一筆計量（ok=false），再照舊上拋給 handle_event 的 except 分支
         _meter_append({"ts": now_iso(), "channel": f"{ctype}:{cid[:20]}",
