@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from claude_failure import classify_failure   # 額度/未知失敗分類（純函式，同目錄）
 
-VERSION = "1.14"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
+VERSION = "1.15"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
 ROOM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 

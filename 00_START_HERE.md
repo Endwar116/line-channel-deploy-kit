@@ -1,7 +1,7 @@
 # LINE_CHANNEL_DEPLOY_KIT v1.0 — 從這裡開始
 
 > 這包做什麼：把一個 LINE 官方帳號變成你的 AI 值台——新機從零到通道活著 ≤ 30 分鐘。
-> 版本：KIT v1.0（2026-08-25 凍結；bridge v1.12）。全包檔案指紋見 `RELEASE_SHA256.txt`。
+> 版本：KIT v1.0（2026-08-25 凍結；bridge v1.15）。全包檔案指紋見 `RELEASE_SHA256.txt`。
 
 ## 前置（裝之前先確認三件事）
 
@@ -64,4 +64,5 @@ LINE Developers console → Messaging API → Webhook URL 填 `https://….ts.ne
 - 值台身分微調：改 `~/.{slug}/CLAUDE.md`（各通道自動傳導；通道專屬段見 `config/channel_discipline_參考.md`）
 - 本體回報：`python3 ~/.{slug}/tools/relay_say.py "話"`（免費）；急件 `line_push.py`（吃額度）
 - 任務驗章：`python3 ~/.{slug}/tools/task_verify.py`；積壓偵測：`queue_backlog_check.py check`
+- 自檢：`python3 ~/.{slug}/tools/health_check.py --always`（每小時自動跑）；唯讀任務執行：`task_runner.py --dry` 先看會做什麼，要自動跑請以 `--with-taskrunner` 重跑安裝器
 - 改碼部署：改檔 → `python3 -m py_compile` → `kill <bridge PID>` → launchd 4 秒自動重生

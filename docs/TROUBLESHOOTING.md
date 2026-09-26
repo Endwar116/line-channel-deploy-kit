@@ -64,3 +64,13 @@
 
 - 全通道死（訊息漏接不重送，除非開 redelivery）；開機後 launchd RunAtLoad 自動復活、Funnel 設定存 state 自動回
 - 長期值台的機器：系統設定關掉自動睡眠
+
+## 10. 重開機後自檢說服務「跑過但停了」
+
+- v1.14 以前：自檢開機第一個跑，其他排程服務還沒輪到第一輪，log 停在關機前→ 被誤判停擺並通知主人。v1.15 起過期時間從「log 最後寫入」與「開機時間」較晚者起算
+- v1.15 之後仍出現＝該服務開機後超過三個排程間隔都沒寫 log，是真的停了：`launchctl list | grep {slug}` 看退出碼，再讀 `~/Library/Logs/{slug}-<服務>.log`
+
+## 11. 影片只有畫格沒有逐字稿／完全讀不了
+
+- INDEX.md 會寫缺什麼。沒有 ffmpeg＝什麼都做不了；有 ffmpeg 沒模型＝只有畫格
+- 安裝：`brew install ffmpeg whisper-cpp`，模型 `ggml-large-v3-turbo-q5_0.bin` 放 `~/.{slug}/models/`。補裝後同一支影片會自動重做
