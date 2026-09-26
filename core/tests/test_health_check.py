@@ -39,6 +39,31 @@ class EffectiveLogAge(unittest.TestCase):
         self.assertLess(bt, time.time())
 
 
+class LogState(unittest.TestCase):
+    """排程型服務：剛安裝還沒輪到第一輪（log 不存在）不算故障。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.log = os.path.join(self.tmp, "x.log")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_new_install_without_log_is_pending(self):
+        now = 1000 * HOUR
+        self.assertEqual(hc.log_state(self.log, 900, now - 300, now, None)[0], "pending")
+
+    def test_old_install_without_log_is_missing(self):
+        now = 1000 * HOUR
+        self.assertEqual(hc.log_state(self.log, 900, now - 48 * HOUR, now, None)[0], "missing")
+
+    def test_fresh_and_stale_log(self):
+        open(self.log, "w").close()
+        m = os.path.getmtime(self.log)
+        self.assertEqual(hc.log_state(self.log, 900, m, m + 60, None)[0], "ok")
+        self.assertEqual(hc.log_state(self.log, 900, m, m + 3 * HOUR, None)[0], "stale")
+
+
 class Deployment(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

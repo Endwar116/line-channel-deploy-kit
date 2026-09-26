@@ -72,6 +72,8 @@ def transcribe(path, out_dir, lang="auto"):
     """回傳 (純文字, 錯誤訊息)。"""
     if not os.path.exists(MODEL):
         return "", f"找不到 whisper 模型 {MODEL}（安裝：{INSTALL_HINT}）"
+    if not os.path.exists(_bin("whisper-cli")):
+        return "", f"這台電腦沒裝 whisper-cli，沒有逐字稿（安裝：{INSTALL_HINT}）"
     with tempfile.TemporaryDirectory() as tmp:
         wav = os.path.join(tmp, "a.wav")
         r = subprocess.run([_bin("ffmpeg"), "-y", "-v", "error", "-i", path, "-vn",
@@ -152,6 +154,11 @@ def digest(path, force=False, frames=True):
     meta = probe(path)
     meta.update({"source": os.path.abspath(path), "sig": sig, "frames": [], "errors": []})
     if meta["has_audio"]:
+        # 缺模型或 whisper-cli 的結果不能進快取，否則補裝後同一支影片永遠沒有逐字稿
+        skipped = [n for n, bad in (("whisper 模型", not os.path.exists(MODEL)),
+                                    ("whisper-cli", not os.path.exists(_bin("whisper-cli")))) if bad]
+        if skipped:
+            meta["missing"] = skipped
         txt, err = transcribe(path, out_dir)
         meta["transcript_chars"] = len(txt)
         if err:

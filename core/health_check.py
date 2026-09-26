@@ -195,6 +195,17 @@ def effective_log_age(mtime, now, boot):
     return now - start
 
 
+def log_state(logp, interval, plist_mtime, now, boot):
+    """排程型服務的 log 狀態：ok／stale（跑過但停了）／pending（剛安裝還沒輪到）／missing（從沒跑過）。
+    寬限＝三個排程間隔、至少 15 分鐘；起算點一律避開關機時間（見 effective_log_age）。"""
+    limit = max(int(interval) * 3, 900)
+    if not os.path.exists(logp):
+        age = effective_log_age(plist_mtime, now, boot)
+        return ("pending" if age <= limit else "missing"), age
+    age = effective_log_age(os.path.getmtime(logp), now, boot)
+    return ("stale" if age > limit else "ok"), age
+
+
 def check_services():
     """偵測「靜默死亡」的排程服務。
 
@@ -268,20 +279,24 @@ def check_services():
             add(FAIL, f"服務 {name}", f"log 在可移除磁區：{logp}")
             continue
 
-        # ② log 從沒被建立
-        if logp and not os.path.exists(logp):
-            add(FAIL, f"服務 {name}", "宣告的 log 不存在——這個 job 從沒成功跑過")
-            continue
-
-        # ③ 排程型但 log 過期
-        if periodic and interval and logp and os.path.exists(logp):
-            age = effective_log_age(os.path.getmtime(logp), datetime.now().timestamp(), boot)
-            limit = max(int(interval) * 3, 900)      # 至少寬限 15 分鐘
-            if age > limit:
+        # ②③ 排程型：log 從沒建立／過期；剛安裝還沒輪到第一輪不算故障
+        if periodic and interval and logp:
+            state, age = log_state(logp, interval, os.path.getmtime(plist_p),
+                                   datetime.now().timestamp(), boot)
+            if state == "pending":
+                add(OK, f"服務 {name}", f"排程型，剛安裝，還沒輪到第一輪（{int(interval)//60} 分鐘一次）")
+                continue
+            if state == "missing":
+                add(FAIL, f"服務 {name}", "宣告的 log 不存在——這個 job 從沒成功跑過")
+                continue
+            if state == "stale":
                 add(FAIL, f"服務 {name}",
                     f"log 已 {int(age//60)} 分鐘沒更新（排程 {int(interval)//60} 分鐘一次）"
                     f"——跑過但停了")
                 continue
+        elif logp and not os.path.exists(logp):
+            add(FAIL, f"服務 {name}", "宣告的 log 不存在——這個 job 從沒成功跑過")
+            continue
 
         if periodic:
             add(OK, f"服務 {name}", f"排程型，{int(interval)//60 if interval else '?'} 分鐘一次，log 新鮮")

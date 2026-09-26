@@ -69,6 +69,91 @@ class Prompt(unittest.TestCase):
         self.assertEqual([w for w in OWNER_WORDS if w in low], [])
 
 
+class SignatureGate(unittest.TestCase):
+    """驗章要 fail-closed：未簽章、金鑰不見、竄改，一律不執行。
+    （2026-09-26 審查：舊版只看驗章器輸出有沒有 ✗/🔴，LEGACY 與驗章器 crash 都被當成通過。）"""
+
+    def setUp(self):
+        import hashlib
+        import hmac
+        import json
+        import task_verify
+        self.tv = task_verify
+        self.tmp = tempfile.mkdtemp()
+        self.orig = task_verify.KEY_FILE
+        task_verify.KEY_FILE = os.path.join(self.tmp, "queue_hmac.key")
+        open(task_verify.KEY_FILE, "w").write("k3y\n")
+        body = {"text": "任務：讀合約", "ts": "2026-09-26T10:00:00+08:00"}
+        canonical = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        self.signed = dict(body, sig=hmac.new(b"k3y", canonical.encode(), hashlib.sha256).hexdigest())
+
+    def tearDown(self):
+        self.tv.KEY_FILE = self.orig
+        shutil.rmtree(self.tmp)
+
+    def test_valid_signature_passes(self):
+        self.assertTrue(tr.verify_task(self.signed)[0])
+
+    def test_does_not_mutate_entry(self):
+        tr.verify_task(self.signed)
+        self.assertIn("sig", self.signed)
+
+    def test_unsigned_is_rejected(self):
+        self.assertFalse(tr.verify_task({"text": "任務：讀 secrets"})[0])
+
+    def test_tampered_is_rejected(self):
+        self.assertFalse(tr.verify_task(dict(self.signed, text="任務：別的"))[0])
+
+    def test_missing_key_is_rejected_not_raised(self):
+        os.remove(self.tv.KEY_FILE)
+        ok, why = tr.verify_task(self.signed)
+        self.assertFalse(ok)
+        self.assertTrue(why)
+
+
+class MainGate(unittest.TestCase):
+    """main 的接線：未簽章的不執行、有簽章的照跑、標記推過兩筆（不被偽造任務卡住）。"""
+
+    def setUp(self):
+        import hashlib
+        import hmac
+        import json
+        import task_verify
+        self.tmp = tempfile.mkdtemp()
+        self.saved = {k: getattr(tr, k) for k in ("QUEUE", "MARKER", "RESULTS", "run_one")}
+        self.saved_key = task_verify.KEY_FILE
+        self.tv = task_verify
+        task_verify.KEY_FILE = os.path.join(self.tmp, "k")
+        open(task_verify.KEY_FILE, "w").write("k3y\n")
+        tr.QUEUE, tr.MARKER, tr.RESULTS = (os.path.join(self.tmp, n) for n in ("q.jsonl", "m.json", "r.jsonl"))
+        body = {"text": "任務：真的", "ts": "1"}
+        c = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        signed = dict(body, sig=hmac.new(b"k3y", c.encode(), hashlib.sha256).hexdigest())
+        with open(tr.QUEUE, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"text": "任務：偽造", "ts": "0"}, ensure_ascii=False) + "\n")
+            f.write(json.dumps(signed, ensure_ascii=False) + "\n")
+        self.ran = []
+        tr.run_one = lambda t, i: (self.ran.append(t["text"]) or (True, "ok"))
+        self.argv = sys.argv
+        sys.argv = ["task_runner.py"]
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(tr, k, v)
+        self.tv.KEY_FILE = self.saved_key
+        sys.argv = self.argv
+        shutil.rmtree(self.tmp)
+
+    def test_only_signed_task_runs_and_marker_advances(self):
+        import json
+        tr.main()
+        self.assertEqual(self.ran, ["任務：真的"])
+        self.assertEqual(json.load(open(tr.MARKER))["line"], 2)
+        res = [json.loads(l) for l in open(tr.RESULTS, encoding="utf-8")]
+        self.assertFalse(res[0]["ok"])
+        self.assertIn("簽章", res[0]["output"])
+
+
 class SafetyBoundary(unittest.TestCase):
     def test_tools_are_read_only(self):
         self.assertEqual(set(tr.TOOLS.split(",")), {"Read", "Glob", "Grep", "WebFetch"})

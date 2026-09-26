@@ -129,15 +129,21 @@ def harvested():
     return 0
 
 
-def verify_signatures():
-    """跑 kit 自己的驗章器。任一筆驗不過就整輪不執行。"""
+def verify_task(entry):
+    """單筆驗章，回 (ok, 原因)。fail-closed：未簽章、金鑰不見、驗章器出錯一律不執行。
+
+    2026-09-26 審查發現舊版 fail-open：只看 task_verify --all 的輸出有沒有 ✗/🔴，
+    未簽章（LEGACY）與驗章器 crash（例如金鑰檔不見）都被當成通過——
+    只要能往佇列檔寫一行不帶 sig 的任務，就能驅動一個有 Read＋WebFetch 的無人看管 agent。
+    傳副本進去：task_verify.verify 會把 sig 從 dict 裡 pop 掉。"""
     try:
-        r = subprocess.run([sys.executable, os.path.join(ROOM, "tools", "task_verify.py"), "--all"],
-                           capture_output=True, text=True, timeout=60)
-        bad = [l for l in r.stdout.splitlines() if l.strip().startswith(("✗", "🔴", "FAIL"))]
-        return (not bad), bad
+        import task_verify
+        v = task_verify.verify(dict(entry))
     except Exception as e:
-        return False, [f"驗章器執行失敗 {type(e).__name__}"]
+        return False, f"驗章器無法執行（{type(e).__name__}）"
+    if v == "OK":
+        return True, ""
+    return False, "沒有簽章" if v == "LEGACY" else "簽章不符"
 
 
 def pick(tasks, limit):
@@ -230,26 +236,26 @@ def main():
               + (f"（{skipped_guest} 筆訪客任務保留給人工）" if skipped_guest else ""))
         return
 
-    ok_sig, bad = verify_signatures()
-    if not ok_sig:
-        print("🔴 簽章驗證未通過，整輪不執行：")
-        for b in bad[:5]:
-            print(f"   {b}")
-        return
+    checked = [(idx, t) + verify_task(t) for idx, t in todo]
 
     if "--dry" in sys.argv:
         print(f"=== 會執行 {len(todo)} 筆（--dry 未實際執行）===")
-        for idx, t in todo:
-            print(f"  #{done+idx+1} {t.get('text','')[:70]}")
+        for idx, t, ok_sig, why in checked:
+            print(f"  #{done+idx+1} {'' if ok_sig else '🔴 不執行（' + why + '）'}{t.get('text','')[:70]}")
         if skipped_guest:
             print(f"  （另有 {skipped_guest} 筆訪客任務不會自動執行）")
         return
 
     results, lines = [], []
-    for idx, t in todo:
+    for idx, t, ok_sig, why in checked:
         label = (t.get("text") or "")[:44].replace("\n", " ")
-        print(f"── 執行 #{done+idx+1}：{label}")
-        ok, out = run_one(t, done + idx + 1)
+        if ok_sig:
+            print(f"── 執行 #{done+idx+1}：{label}")
+            ok, out = run_one(t, done + idx + 1)
+        else:
+            # 不執行，但照樣記錄、回報、推進標記——一筆偽造的任務不能卡住後面所有任務
+            print(f"── 🔴 擋下 #{done+idx+1}：{label}（{why}）")
+            ok, out = False, f"⚠️ 簽章驗證未通過（{why}），沒有執行。這筆不是從 LINE 正常進來的，請查看佇列檔。"
         print(f"   {'✓' if ok else '✗'} {out[:120]}")
         rec = {"ts": datetime.now(TZ).isoformat(timespec="seconds"),
                "queue_line": done + idx + 1, "task": t.get("text", "")[:200],

@@ -52,7 +52,8 @@ def ask(prompt, current, pattern=None, hint=""):
 
 
 def render(tmpl_path, mapping):
-    s = open(tmpl_path, encoding="utf-8").read()
+    with open(tmpl_path, encoding="utf-8") as f:
+        s = f.read()
     for k, v in mapping.items():
         s = s.replace("{" + k + "}", str(v))
     return s
@@ -91,6 +92,39 @@ def build_ocr(base):
     if r.returncode != 0:
         return "PENDING", f"編譯失敗：{(r.stderr or '')[:160]}"
     return "PASS", "已編譯 tools/bin/ocr"
+
+
+def install_extra_agents(slug, home, base, plist_dir, port, with_taskrunner, run=subprocess.run):
+    """自檢（每小時，一律啟用）與任務執行（每 15 分，預設不啟用）的 launchd。
+
+    「不啟用」＝根本不放進 LaunchAgents：launchd 登入時會載入那個資料夾裡所有 plist，
+    只 unload 不移走的話，重開機後就自己跑起來、開始自動消耗額度（2026-09-26 審查 C1）。
+    未啟用時 plist 放 config/launchd/ 備查。已經在 LaunchAgents 裡的＝主人之前啟用過，重跑安裝器保留啟用。
+    任務執行先載入：自檢 RunAtLoad 會立刻跑，順序反過來第一輪自檢就報「未載入」。"""
+    mapping = {"SLUG": slug, "PORT": port, "HOME": home, "BASE": base, "PYTHON": "/usr/bin/python3"}
+
+    def tmpl(name):
+        return render(os.path.join(KIT, "templates", "launchd", f"com.SLUG.{name}.plist.tmpl"), mapping)
+
+    def load(p):
+        run(["launchctl", "unload", p], capture_output=True)
+        r = run(["launchctl", "load", p], capture_output=True, text=True)
+        return "已載入" if r.returncode == 0 else f"載入失敗 rc={r.returncode}"
+
+    tr_la = os.path.join(plist_dir, f"com.{slug}.taskrunner.plist")
+    if with_taskrunner or os.path.exists(tr_la):
+        put(tr_la, tmpl("taskrunner"), label=tr_la)
+        print(f"launchd：taskrunner {load(tr_la)}" + ("" if with_taskrunner else "（之前已啟用，保留）"))
+    else:
+        ref_dir = os.path.join(base, "config", "launchd")
+        os.makedirs(ref_dir, exist_ok=True)
+        ref = os.path.join(ref_dir, f"com.{slug}.taskrunner.plist")
+        put(ref, tmpl("taskrunner"), label=ref)
+        print("launchd：taskrunner 未啟用（會自動消耗 Claude 額度）——要啟用請加 --with-taskrunner 重跑安裝器")
+
+    hc = os.path.join(plist_dir, f"com.{slug}.healthcheck.plist")
+    put(hc, tmpl("healthcheck"), label=hc)
+    print(f"launchd：healthcheck {load(hc)}")
 
 
 def selftest(base, port, launchd_loaded, ocr=("PENDING", "")):
@@ -224,7 +258,8 @@ def main():
     print(f"  ① core 工具 10 支＋OCR＋測試 → {base}/tools/")
     print(f"  ② config（kit_config.json＋queue_hmac.key＋member_alias＋attach_whitelist＋empty_mcp）")
     print(f"  ③ 身分檔 → {base}/CLAUDE.md（既有不覆蓋）；secrets 空殼 → config/secrets/（既有不覆蓋）")
-    print(f"  ④ launchd → {plist_p}" + ("（--skip-launchd：跳過）" if a.skip_launchd else "＋launchctl load"))
+    print(f"  ④ launchd → {plist_p}＋每小時自檢" + ("＋任務執行" if a.with_taskrunner else "（任務執行不啟用）")
+          + ("（--skip-launchd：跳過）" if a.skip_launchd else "＋launchctl load"))
     print(f"  ⑤ selftest ＋ 人類動作清單")
     if not a.yes and sys.stdin.isatty():
         if input("繼續？[y/N] ").strip().lower() != "y":
@@ -329,17 +364,7 @@ def main():
             print("launchd：已載入（KeepAlive 常駐；secrets 未填時 bridge 會 fail-closed 等你填）")
         else:
             print(f"launchd：載入失敗 rc={r.returncode} {(r.stderr or '').strip()[:120]}")
-        for name, load in (("healthcheck", True), ("taskrunner", a.with_taskrunner)):
-            p = os.path.join(plist_dir, f"com.{slug}.{name}.plist")
-            put(p, render(os.path.join(KIT, "templates", "launchd", f"com.SLUG.{name}.plist.tmpl"),
-                          {"SLUG": slug, "PORT": port, "HOME": home, "BASE": base,
-                           "PYTHON": "/usr/bin/python3"}), label=p)
-            subprocess.run(["launchctl", "unload", p], capture_output=True)
-            if load:
-                rr = subprocess.run(["launchctl", "load", p], capture_output=True, text=True)
-                print(f"launchd：{name} " + ("已載入" if rr.returncode == 0 else f"載入失敗 rc={rr.returncode}"))
-            else:
-                print(f"launchd：{name} 已安裝未載入（要自動執行任務請加 --with-taskrunner 重跑）")
+        install_extra_agents(slug, home, base, plist_dir, port, a.with_taskrunner)
 
     # ── ⑤ selftest ──
     print("\nselftest：")

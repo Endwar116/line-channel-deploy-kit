@@ -67,6 +67,50 @@ class PlistTemplates(unittest.TestCase):
             self.assertEqual(d["StandardOutPath"], f"/Users/a/Library/Logs/acme-{name}.log")
 
 
+class ExtraAgents(unittest.TestCase):
+    """任務執行「預設不啟用」要撐過重開機：launchd 登入時會載入 LaunchAgents 裡所有 plist，
+    所以不啟用＝根本不放進 LaunchAgents（2026-09-26 審查 C1）。"""
+
+    def setUp(self):
+        sys.path.insert(0, KIT)
+        import install
+        self.install = install
+        self.home = tempfile.mkdtemp()
+        self.base = os.path.join(self.home, ".acme")
+        self.la = os.path.join(self.home, "Library", "LaunchAgents")
+        os.makedirs(self.la)
+        os.makedirs(os.path.join(self.base, "config"))
+        self.calls = []
+
+    def tearDown(self):
+        shutil.rmtree(self.home)
+
+    def run_it(self, with_taskrunner):
+        fake = lambda cmd, **kw: self.calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", "")
+        self.install.install_extra_agents("acme", self.home, self.base, self.la, 8700,
+                                          with_taskrunner, run=fake)
+
+    def loaded(self):
+        return [os.path.basename(c[-1]) for c in self.calls if c[:2] == ["launchctl", "load"]]
+
+    def test_default_keeps_taskrunner_out_of_launchagents(self):
+        self.run_it(False)
+        self.assertFalse(os.path.exists(os.path.join(self.la, "com.acme.taskrunner.plist")))
+        self.assertTrue(os.path.exists(os.path.join(self.base, "config", "launchd", "com.acme.taskrunner.plist")))
+        self.assertEqual(self.loaded(), ["com.acme.healthcheck.plist"])
+
+    def test_flag_loads_taskrunner_before_healthcheck(self):
+        # 自檢 RunAtLoad 會立刻跑；任務執行要先載入，否則第一輪自檢就報「未載入」
+        self.run_it(True)
+        self.assertEqual(self.loaded(), ["com.acme.taskrunner.plist", "com.acme.healthcheck.plist"])
+
+    def test_rerun_without_flag_keeps_existing_enabled_taskrunner(self):
+        open(os.path.join(self.la, "com.acme.taskrunner.plist"), "w").write("old")
+        self.run_it(False)
+        self.assertTrue(os.path.exists(os.path.join(self.la, "com.acme.taskrunner.plist")))
+        self.assertIn("com.acme.taskrunner.plist", self.loaded())
+
+
 class NoSwiftc(unittest.TestCase):
     def test_install_without_swiftc_still_succeeds(self):
         home = tempfile.mkdtemp()

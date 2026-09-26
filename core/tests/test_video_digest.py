@@ -45,6 +45,43 @@ class MissingDependencies(unittest.TestCase):
         self.assertIn("ffmpeg", vd.read_media(self.video))
 
 
+class WhisperMissing(unittest.TestCase):
+    """有 ffmpeg，但缺 whisper-cli 或模型——最常見的半安裝狀態。"""
+
+    def setUp(self):
+        import shutil as sh
+        import subprocess
+        self.ffmpeg = sh.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+        if not os.path.exists(self.ffmpeg):
+            self.skipTest("本機沒有 ffmpeg")
+        self.tmp = tempfile.mkdtemp()
+        self.orig = (vd._bin, vd.DIGEST, vd.MODEL)
+        vd.DIGEST = os.path.join(self.tmp, "digest")
+        vd.MODEL = os.path.join(self.tmp, "model.bin")
+        self.video = os.path.join(self.tmp, "clip.mp4")
+        subprocess.run([self.ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=red:s=64x48:d=1",
+                        "-f", "lavfi", "-i", "sine=d=1", "-shortest", "-y", self.video], check=True)
+
+    def tearDown(self):
+        vd._bin, vd.DIGEST, vd.MODEL = self.orig
+        shutil.rmtree(self.tmp)
+
+    def test_missing_whisper_cli_does_not_crash(self):
+        open(vd.MODEL, "wb").close()
+        real = self.orig[0]
+        vd._bin = lambda n: os.path.join(self.tmp, "nope", n) if n == "whisper-cli" else real(n)
+        out_dir, meta = vd.digest(self.video)
+        self.assertTrue(any("whisper-cli" in e for e in meta["errors"]), meta["errors"])
+        self.assertTrue(os.path.exists(os.path.join(out_dir, "INDEX.md")))
+
+    def test_model_installed_later_is_picked_up(self):
+        _, meta = vd.digest(self.video)
+        self.assertTrue(any("找不到 whisper 模型" in e for e in meta["errors"]))
+        open(vd.MODEL, "wb").close()          # 補裝模型（假檔，whisper 會失敗，但不能再回「找不到模型」）
+        _, meta = vd.digest(self.video)
+        self.assertFalse(any("找不到 whisper 模型" in e for e in meta["errors"]), meta["errors"])
+
+
 class Paths(unittest.TestCase):
     def test_no_owner_paths(self):
         for mod in ("video_digest.py", "read_doc.py"):

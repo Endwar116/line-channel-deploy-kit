@@ -110,6 +110,8 @@ def read_pdf(p):
     if len(t) > 30:
         return re.sub(r"\n{3,}", "\n\n", t)
     # 沒有文字層＝掃描影像，改用 macOS Vision OCR
+    if not os.path.exists(OCR_BIN):
+        return f"[無法讀取] 本檔沒有文字層（掃描檔），需要 {OCR_MISSING}"
     ocr = run_ocr(p)
     if ocr:
         return "[本檔無文字層，以下為 OCR 辨識結果]\n\n" + ocr
@@ -117,6 +119,7 @@ def read_pdf(p):
 
 
 OCR_BIN = os.path.join(ROOM, "tools", "bin", "ocr")
+OCR_MISSING = "OCR 未安裝——`xcode-select --install` 後重跑安裝器即可啟用"
 
 
 def run_ocr(path, timeout=300):
@@ -131,6 +134,8 @@ def run_ocr(path, timeout=300):
 
 
 def read_image(p):
+    if not os.path.exists(OCR_BIN):
+        return f"[無法讀取] 圖片需要 {OCR_MISSING}"
     t = run_ocr(p)
     if t:
         return "[圖片 OCR 辨識結果]\n\n" + t
