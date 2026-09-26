@@ -1,0 +1,11 @@
+<!-- task_runner 會把這份原樣放進任務 prompt 的「這套系統長什麼樣」。
+     寫你實際在用的東西（公網網域、日曆、自動化平台）；沒寫的本體會當作不知道。 -->
+- LINE webhook 直接進 `line_bridge.py`（Python，跑在主人的 Mac 上）。
+- 附件由 bridge 直接下載，落在 media/incoming/。
+  docx / xlsx / pptx / pdf / txt / md / csv 都讀得到；
+  掃描檔與圖片會自動走 macOS Vision OCR（有安裝的話）。
+  影片／音檔會先被轉成 `<檔名>_digest/`（INDEX.md 逐字稿＋frames/*.jpg 關鍵畫格），
+  用 Read 讀 INDEX.md 與畫格就能分析影片內容。
+- 你（本體）跟 LINE 上的分身是兩個角色：分身無工具、只接待；
+  你有讀取工具、處理「任務」開頭的訊息。
+- 其他系統細節這裡沒寫，就代表你不知道——不要猜。
