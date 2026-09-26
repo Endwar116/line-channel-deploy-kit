@@ -4,16 +4,18 @@
 ================================================================================
 用法：
   python3 install.py --owner 主人名 --agent-name 值台名 --slug slug [--port 8700]
-                     [--skip-launchd] [--yes]
+                     [--skip-launchd] [--with-taskrunner] [--yes]
   參數未給且在互動終端 → 逐項問；非互動缺參數 → 印用法退出。
 
 做的事（全部只動 ~/.{slug}/ 與 ~/Library/LaunchAgents/，絕不碰其他目錄）：
   1. 展開 core/ 工具 → ~/.{slug}/tools/（bridge＋claude_failure＋relay_say＋line_push＋task_verify
-     ＋queue_backlog_check），測試 → ~/.{slug}/tools/tests/（裝完可自行 unittest 覆驗）
+     ＋queue_backlog_check；v1.15 起加本體側 health_check＋task_runner＋read_doc＋video_digest），
+     測試 → ~/.{slug}/tools/tests/（裝完可自行 unittest 覆驗）
   2. 生成 config/kit_config.json（身分參數單一真源）＋queue_hmac.key（隨機生成，600）
   3. 展開 templates/ → 身分檔 CLAUDE.md（{AGENT_NAME}/{OWNER_NAME} 代入）＋secrets 空殼（600）
      ＋member_alias.json＋attach_whitelist.txt＋通道專屬段參考
-  4. launchd plist 生成＋載入（--skip-launchd 可跳過）
+  4. launchd plist 生成＋載入（--skip-launchd 可跳過）：bridge、每小時自檢；
+     任務執行只安裝不載入，要自動執行加 --with-taskrunner（會自動消耗 Claude 額度）
   5. selftest：依賴 import／簽章驗證器自測／secrets 存在性／port 監聽——關鍵項全綠才報安裝成功
   6. 印「下一步人類動作清單」（申請 channel→填 secrets→Funnel→貼 webhook→測試訊息）
 
@@ -77,7 +79,21 @@ def put(path, content, mode=None, skip_if_exists=False, label=""):
         os.chmod(path, mode)
 
 
-def selftest(base, port, launchd_loaded):
+def build_ocr(base):
+    """編譯 macOS Vision OCR。沒有 swiftc（未裝 Xcode Command Line Tools）不算失敗：
+    read_doc 讀圖片時會明說 OCR 未安裝。KIT_NO_SWIFTC=1 供測試模擬。"""
+    src = os.path.join(base, "tools", "bin", "ocr.swift")
+    out = os.path.join(base, "tools", "bin", "ocr")
+    swiftc = None if os.environ.get("KIT_NO_SWIFTC") else shutil.which("swiftc")
+    if not swiftc:
+        return "PENDING", "沒有 swiftc——`xcode-select --install` 後重跑安裝器即可啟用圖片 OCR"
+    r = subprocess.run([swiftc, "-O", src, "-o", out], capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        return "PENDING", f"編譯失敗：{(r.stderr or '')[:160]}"
+    return "PASS", "已編譯 tools/bin/ocr"
+
+
+def selftest(base, port, launchd_loaded, ocr=("PENDING", "")):
     """回 (results, hard_fail)。關鍵項：依賴/簽章/secrets 檔在。port 未監聽在未載入時=PENDING 非失敗。"""
     results = []
     hard_fail = False
@@ -137,6 +153,32 @@ def selftest(base, port, launchd_loaded):
         results.append(("bridge py_compile", "FAIL", (r.stderr or "")[:120]))
         hard_fail = True
 
+    # ⑤b 本體側工具 import（v1.15）——py_compile 不解析 import，漏檔要真的 import 才會炸（缺陷 F 模式）
+    tools = os.path.join(base, "tools")
+    r = subprocess.run([sys.executable, "-c", "import health_check, task_runner, read_doc, video_digest"],
+                       cwd=tools, capture_output=True, text=True)
+    if r.returncode == 0:
+        results.append(("本體側工具 import", "PASS", "health_check／task_runner／read_doc／video_digest"))
+    else:
+        results.append(("本體側工具 import", "FAIL", (r.stderr or "").strip().splitlines()[-1][:160]))
+        hard_fail = True
+
+    # ⑤c 可選能力：圖片 OCR、影片逐字稿（缺了只降級，不擋裝）
+    results.append(("OCR（圖片／掃描檔）", ocr[0], ocr[1]))
+    r = subprocess.run([sys.executable, "-c",
+                        "import json, os, video_digest as v; "
+                        "print(json.dumps([v.missing_tools(), os.path.exists(v.MODEL), v.INSTALL_HINT]))"],
+                       cwd=tools, capture_output=True, text=True)
+    try:
+        miss, model_ok, hint = json.loads(r.stdout)
+        if miss or not model_ok:
+            results.append(("影片逐字稿", "PENDING",
+                            f"缺 {'、'.join(miss + ([] if model_ok else ['whisper 模型']))}——{hint}"))
+        else:
+            results.append(("影片逐字稿", "PASS", "ffmpeg＋whisper＋模型齊全"))
+    except Exception:
+        results.append(("影片逐字稿", "WARN", "無法檢查"))
+
     # ⑥ port 監聽（launchd 載入且 secrets 已填才會真監聽）
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=2):
@@ -161,6 +203,8 @@ def main():
     ap.add_argument("--slug", default=None, help="小寫英數代號（家目錄 ~/.{slug}/ 與 launchd label 用）")
     ap.add_argument("--port", type=int, default=8700, help="bridge 本機監聽埠（預設 8700）")
     ap.add_argument("--skip-launchd", action="store_true", help="不生成/載入 launchd（測試或稍後手動）")
+    ap.add_argument("--with-taskrunner", action="store_true",
+                    help="載入每 15 分鐘的唯讀任務執行（會自動消耗 Claude 額度；預設只安裝不載入）")
     ap.add_argument("--yes", action="store_true", help="略過確認提問")
     a = ap.parse_args()
 
@@ -177,7 +221,7 @@ def main():
     plist_p = os.path.join(plist_dir, f"com.{slug}.linebridge.plist")
 
     print(f"\n安裝計畫：owner={owner} agent={agent} slug={slug} port={port}")
-    print(f"  ① core 工具 6 支＋測試 → {base}/tools/")
+    print(f"  ① core 工具 10 支＋OCR＋測試 → {base}/tools/")
     print(f"  ② config（kit_config.json＋queue_hmac.key＋member_alias＋attach_whitelist＋empty_mcp）")
     print(f"  ③ 身分檔 → {base}/CLAUDE.md（既有不覆蓋）；secrets 空殼 → config/secrets/（既有不覆蓋）")
     print(f"  ④ launchd → {plist_p}" + ("（--skip-launchd：跳過）" if a.skip_launchd else "＋launchctl load"))
@@ -187,22 +231,33 @@ def main():
             sys.exit("中止（未動任何檔案）")
 
     # ── ① 目錄與 core ──
-    for d in ("tools", os.path.join("tools", "tests"), "config/secrets", "LOG", "chats",
+    for d in ("tools", os.path.join("tools", "tests"), os.path.join("tools", "bin"), "models",
+              "config/secrets", "LOG", "chats",
               "attachments", os.path.join("media", "incoming")):
         os.makedirs(os.path.join(base, d), exist_ok=True)
     print("展開：")
     # claude_failure.py 是 line_bridge 的頂層 import（from claude_failure import classify_failure）。
     # 漏掉它 bridge 會 ImportError 死在啟動，不是功能降級——名單少一個檔就是整站不起來。
-    for f in ("line_bridge.py", "claude_failure.py", "relay_say.py", "line_push.py",
-              "task_verify.py", "queue_backlog_check.py"):
+    CORE_TOOLS = ("line_bridge.py", "claude_failure.py", "relay_say.py", "line_push.py",
+                  "task_verify.py", "queue_backlog_check.py",
+                  # v1.15：本體側工具（自檢、唯讀任務執行、文件／影片讀取）
+                  "health_check.py", "task_runner.py", "read_doc.py", "video_digest.py")
+    for f in CORE_TOOLS:
         put(os.path.join(base, "tools", f), open(os.path.join(KIT, "core", f), encoding="utf-8").read(),
             label=f"tools/{f}")
+    put(os.path.join(base, "tools", "bin", "ocr.swift"),
+        open(os.path.join(KIT, "core", "bin", "ocr.swift"), encoding="utf-8").read(),
+        label="tools/bin/ocr.swift")
     # 測試隨工具一起出貨：裝完可用 `cd ~/.{slug}/tools && python3 -m unittest discover -s tests`
     # 自證核心行為真的接在 bridge 上，不必只信 selftest 的 GREEN 字樣。
     # 用 glob 而非寫死名單——寫死的話每加一個測試就要記得改這裡，
     # 跟當初漏掉 claude_failure.py 是同一類錯誤，而且漏了不會有任何徵兆。
+    # test_install.py 是 kit 專用：它要在 kit 樹跑安裝器，裝進客戶樹會找不到 install.py 且會遞迴安裝。
+    KIT_ONLY_TESTS = {"test_install.py"}
     for f in sorted(os.path.basename(p) for p in
                     glob.glob(os.path.join(KIT, "core", "tests", "*.py"))):
+        if f in KIT_ONLY_TESTS:
+            continue
         put(os.path.join(base, "tools", "tests", f),
             open(os.path.join(KIT, "core", "tests", f), encoding="utf-8").read(),
             label=f"tools/tests/{f}")
@@ -236,6 +291,11 @@ def main():
     put(os.path.join(base, "config", "channel_discipline_參考.md"),
         open(os.path.join(KIT, "templates", "channel_discipline.tmpl"), encoding="utf-8").read(),
         skip_if_exists=True, label="config/channel_discipline_參考.md")
+    put(os.path.join(base, "config", "system_brief.md"),
+        open(os.path.join(KIT, "templates", "system_brief.md.tmpl"), encoding="utf-8").read(),
+        skip_if_exists=True, label="config/system_brief.md（任務執行的系統說明，請依實況改寫）")
+    ocr_status, ocr_detail = build_ocr(base)
+    print(f"  OCR：{ocr_status} {ocr_detail}")
 
     # ── ③ 身分檔＋secrets（既有一律不覆蓋） ──
     put(os.path.join(base, "CLAUDE.md"),
@@ -269,10 +329,21 @@ def main():
             print("launchd：已載入（KeepAlive 常駐；secrets 未填時 bridge 會 fail-closed 等你填）")
         else:
             print(f"launchd：載入失敗 rc={r.returncode} {(r.stderr or '').strip()[:120]}")
+        for name, load in (("healthcheck", True), ("taskrunner", a.with_taskrunner)):
+            p = os.path.join(plist_dir, f"com.{slug}.{name}.plist")
+            put(p, render(os.path.join(KIT, "templates", "launchd", f"com.SLUG.{name}.plist.tmpl"),
+                          {"SLUG": slug, "PORT": port, "HOME": home, "BASE": base,
+                           "PYTHON": "/usr/bin/python3"}), label=p)
+            subprocess.run(["launchctl", "unload", p], capture_output=True)
+            if load:
+                rr = subprocess.run(["launchctl", "load", p], capture_output=True, text=True)
+                print(f"launchd：{name} " + ("已載入" if rr.returncode == 0 else f"載入失敗 rc={rr.returncode}"))
+            else:
+                print(f"launchd：{name} 已安裝未載入（要自動執行任務請加 --with-taskrunner 重跑）")
 
     # ── ⑤ selftest ──
     print("\nselftest：")
-    results, hard_fail = selftest(base, port, launchd_loaded)
+    results, hard_fail = selftest(base, port, launchd_loaded, (ocr_status, ocr_detail))
     for name, st, detail in results:
         icon = {"PASS": "✅", "FAIL": "🔴", "WARN": "⚠️", "PENDING": "⏳"}[st]
         print(f"  {icon} {st:<7} {name}" + (f"　{detail}" if detail else ""))

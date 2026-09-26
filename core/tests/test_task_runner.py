@@ -38,11 +38,15 @@ class Brief(unittest.TestCase):
 
     def test_template_comment_is_not_sent_to_agent(self):
         # 安裝器放的範本開頭有給部署者看的註解，不該進 prompt
-        tmpl = os.path.join(os.path.dirname(os.path.dirname(tr.__file__)), "templates", "system_brief.md.tmpl")
+        # kit 樹是 templates/ 下的範本；安裝樹是安裝器從範本放好的 config/system_brief.md
+        cands = [os.path.join(tr.ROOM, "templates", "system_brief.md.tmpl"),
+                 os.path.join(tr.ROOM, "config", "system_brief.md")]
+        tmpl = next(p for p in cands if os.path.exists(p))
         tr.BRIEF = os.path.join(self.tmp, "b.md")
         shutil.copy(tmpl, tr.BRIEF)
         self.assertNotIn("<!--", tr.load_brief())
-        self.assertEqual(tr.load_brief(), tr.DEFAULT_BRIEF)
+        if tmpl == cands[0]:                 # 部署者改寫過的 config 版內容本來就不同
+            self.assertEqual(tr.load_brief(), tr.DEFAULT_BRIEF)
 
     def test_file_brief_is_used(self):
         tr.BRIEF = os.path.join(self.tmp, "b.md")

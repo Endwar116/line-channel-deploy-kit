@@ -48,7 +48,8 @@ class MissingDependencies(unittest.TestCase):
 class Paths(unittest.TestCase):
     def test_no_owner_paths(self):
         for mod in ("video_digest.py", "read_doc.py"):
-            src = open(os.path.join(os.path.dirname(vd.__file__), mod), encoding="utf-8").read()
+            with open(os.path.join(os.path.dirname(vd.__file__), mod), encoding="utf-8") as f:
+                src = f.read()
             self.assertNotIn(".ownerkit", src)
 
 
