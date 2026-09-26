@@ -56,7 +56,18 @@ def main():
     # 掛到最高規格通道（如主人的職場群）等於把內部回報送到外人面前。
     # 要在那裡發言，必須經由該通道值台、走它自己的紀律。
     s_tier = set(cfg.get("s_tier_channels", []))
-    if any(t in channel for t in s_tier):
+    # 例外：主人自己的私訊。這道防護的用意是「別把內部回報送進有外人的職場群」，
+    # 而主人的私訊正是內部回報該去的地方——那裡只有主人一個人。
+    # （2026-09-04 線上實故障：把私訊設為 S 級以放行附件後，本體回報路徑被這道檢查鎖死。
+    #   根因是 s_tier_channels 在 line_bridge.py 是「信任高→放寬」、
+    #   在本檔是「職場敏感→收緊」，同一個鍵兩種相反語意；v1.13 已在 bridge 拆開。）
+    _owner_uid = ""
+    try:
+        _owner_uid = open(OWNER, encoding="utf-8").readline().strip()
+    except Exception:
+        pass
+    is_owner_dm = bool(_owner_uid) and channel == f"dm:{_owner_uid}"
+    if not is_owner_dm and any(t in channel for t in s_tier):
         sys.exit("✗ 拒絕：目標是高信任職場通道。\n"
                  "  待轉達會原樣送出本體的話——內部回報不得進入該通道。\n"
                  "  要在那裡發言請走該通道值台（它讀該通道的專屬紀律），或請主人親自轉述。")
