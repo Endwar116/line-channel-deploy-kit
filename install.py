@@ -9,7 +9,7 @@
 
 做的事（全部只動 ~/.{slug}/ 與 ~/Library/LaunchAgents/，絕不碰其他目錄）：
   1. 展開 core/ 工具 → ~/.{slug}/tools/（bridge＋claude_failure＋line_video＋relay_say＋line_push＋task_verify
-     ＋queue_backlog_check；v1.15 起加本體側 health_check＋task_runner＋read_doc＋video_digest），
+     ＋queue_backlog_check；v1.15 起加本體側 health_check＋task_runner＋read_doc＋video_digest＋video_link），
      測試 → ~/.{slug}/tools/tests/（裝完可自行 unittest 覆驗）
   2. 生成 config/kit_config.json（身分參數單一真源）＋queue_hmac.key（隨機生成，600）
   3. 展開 templates/ → 身分檔 CLAUDE.md（{AGENT_NAME}/{OWNER_NAME} 代入）＋secrets 空殼（600）
@@ -189,10 +189,10 @@ def selftest(base, port, launchd_loaded, ocr=("PENDING", "")):
 
     # ⑤b 本體側工具 import（v1.15）——py_compile 不解析 import，漏檔要真的 import 才會炸（缺陷 F 模式）
     tools = os.path.join(base, "tools")
-    r = subprocess.run([sys.executable, "-c", "import health_check, task_runner, read_doc, video_digest, line_video"],
+    r = subprocess.run([sys.executable, "-c", "import health_check, task_runner, read_doc, video_digest, line_video, video_link"],
                        cwd=tools, capture_output=True, text=True)
     if r.returncode == 0:
-        results.append(("本體側工具 import", "PASS", "health_check／task_runner／read_doc／video_digest／line_video"))
+        results.append(("本體側工具 import", "PASS", "health_check／task_runner／read_doc／video_digest／line_video／video_link"))
     else:
         results.append(("本體側工具 import", "FAIL", (r.stderr or "").strip().splitlines()[-1][:160]))
         hard_fail = True
@@ -212,6 +212,11 @@ def selftest(base, port, launchd_loaded, ocr=("PENDING", "")):
             results.append(("影片逐字稿", "PASS", "ffmpeg＋whisper＋模型齊全"))
     except Exception:
         results.append(("影片逐字稿", "WARN", "無法檢查"))
+
+    # ⑤d 可選能力：任務裡的影片連結（yt-dlp）
+    ytdlp = shutil.which("yt-dlp") or ("/opt/homebrew/bin/yt-dlp" if os.path.exists("/opt/homebrew/bin/yt-dlp") else None)
+    results.append(("影片連結下載", "PASS" if ytdlp else "PENDING",
+                    ytdlp or "沒有 yt-dlp——brew install yt-dlp 後，任務裡的公開影片連結就看得懂"))
 
     # ⑥ port 監聽（launchd 載入且 secrets 已填才會真監聽）
     try:
@@ -255,7 +260,7 @@ def main():
     plist_p = os.path.join(plist_dir, f"com.{slug}.linebridge.plist")
 
     print(f"\n安裝計畫：owner={owner} agent={agent} slug={slug} port={port}")
-    print(f"  ① core 工具 11 支＋OCR＋測試 → {base}/tools/")
+    print(f"  ① core 工具 12 支＋OCR＋測試 → {base}/tools/")
     print(f"  ② config（kit_config.json＋queue_hmac.key＋member_alias＋attach_whitelist＋empty_mcp）")
     print(f"  ③ 身分檔 → {base}/CLAUDE.md（既有不覆蓋）；secrets 空殼 → config/secrets/（既有不覆蓋）")
     print(f"  ④ launchd → {plist_p}＋每小時自檢" + ("＋任務執行" if a.with_taskrunner else "（任務執行不啟用）")
@@ -277,7 +282,7 @@ def main():
     CORE_TOOLS = ("line_bridge.py", "claude_failure.py", "line_video.py", "relay_say.py", "line_push.py",
                   "task_verify.py", "queue_backlog_check.py",
                   # v1.15：本體側工具（自檢、唯讀任務執行、文件／影片讀取）
-                  "health_check.py", "task_runner.py", "read_doc.py", "video_digest.py")
+                  "health_check.py", "task_runner.py", "read_doc.py", "video_digest.py", "video_link.py")
     for f in CORE_TOOLS:
         put(os.path.join(base, "tools", f), open(os.path.join(KIT, "core", f), encoding="utf-8").read(),
             label=f"tools/{f}")

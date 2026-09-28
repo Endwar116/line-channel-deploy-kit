@@ -44,6 +44,7 @@ TZ = timezone(timedelta(hours=8))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from video_digest import MEDIA_EXT, digest  # noqa: E402
+from video_link import LinkRejected, find_video_links, fetch as fetch_link  # noqa: E402
 
 TOOLS = "Read,Glob,Grep,WebFetch"      # 白名單：只有讀與查
 MAX_PER_RUN = 3
@@ -57,6 +58,8 @@ DEFAULT_BRIEF = """- LINE webhook 直接進 `line_bridge.py`（Python，跑在�
   掃描檔與圖片會自動走 macOS Vision OCR（有安裝的話）。
   影片／音檔會先被轉成 `<檔名>_digest/`（INDEX.md 逐字稿＋frames/*.jpg 關鍵畫格），
   用 Read 讀 INDEX.md 與畫格就能分析影片內容。
+- 任務裡的影片連結（YouTube、Facebook、Instagram 等公開影片）也會先被下載並轉成同樣的 `_digest/`；
+  抓不到的，檔案清單會寫原因，照實轉告主人。
 - 你（本體）跟 LINE 上的分身是兩個角色：分身無工具、只接待；
   你有讀取工具、處理「任務」開頭的訊息。
 - 其他系統細節這裡沒寫，就代表你不知道——不要猜。"""
@@ -194,6 +197,18 @@ def prepare_workspace(tid, task_text):
                 copied.append(os.path.basename(dst) + "/INDEX.md（逐字稿＋畫格清單，畫格 jpg 可用 Read 看）")
             except Exception as e:
                 copied.append(f"（{f} 影片處理失敗：{type(e).__name__}）")
+    # 任務帶影片連結（2026-09-28）：同樣由 Python 下載＋轉逐字稿，agent 只讀結果。
+    # 抓不到的原因寫進檔案清單，讓 agent 照實告訴主人，而不是假裝看過。
+    for url in find_video_links(task_text):
+        try:
+            out_dir, _ = digest(fetch_link(url))
+            dst = os.path.join(d, os.path.basename(out_dir) + "_digest")
+            shutil.copytree(out_dir, dst)
+            copied.append(f"{os.path.basename(dst)}/INDEX.md（{url} 的逐字稿＋畫格清單，畫格 jpg 可用 Read 看）")
+        except LinkRejected as e:
+            copied.append(f"（{url} 抓不到：{e}）")
+        except Exception as e:
+            copied.append(f"（{url} 影片處理失敗：{type(e).__name__}）")
     return d, copied
 
 

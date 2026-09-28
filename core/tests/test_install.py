@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 KIT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-NEW_TOOLS = ("health_check.py", "task_runner.py", "read_doc.py", "video_digest.py", "line_video.py")
+NEW_TOOLS = ("health_check.py", "task_runner.py", "read_doc.py", "video_digest.py", "line_video.py", "video_link.py")
 
 
 def run_install(home, extra_env=None):

@@ -177,6 +177,46 @@ class AttachmentMatching(unittest.TestCase):
         self.assertFalse(tr.names_file("任務：看合約", "合約.pdf"))
 
 
+class VideoLinks(unittest.TestCase):
+    """任務帶影片連結：Python 先下載、轉逐字稿，放進工作區；抓不到就把原因交給 agent 照實講。"""
+
+    def setUp(self):
+        import video_link
+        self.vl = video_link
+        self.tmp = tempfile.mkdtemp()
+        self.saved = {k: getattr(tr, k) for k in ("WORKSPACE", "INCOMING", "fetch_link", "digest")}
+        tr.WORKSPACE = os.path.join(self.tmp, "ws")
+        tr.INCOMING = os.path.join(self.tmp, "incoming")
+        digest_dir = os.path.join(self.tmp, "digest", "連結影片_abc")
+        os.makedirs(digest_dir)
+        open(os.path.join(digest_dir, "INDEX.md"), "w").write("# 逐字稿")
+        tr.digest = lambda path: (digest_dir, {})
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(tr, k, v)
+        shutil.rmtree(self.tmp)
+
+    def test_link_is_downloaded_and_digested_into_workspace(self):
+        got = []
+        tr.fetch_link = lambda url: got.append(url) or os.path.join(self.tmp, "連結影片_abc.mp4")
+        ws, copied = tr.prepare_workspace("t1", "任務：看這支 https://fb.watch/abc/ 講重點")
+        self.assertEqual(got, ["https://fb.watch/abc/"])
+        self.assertTrue(os.path.exists(os.path.join(ws, "連結影片_abc_digest", "INDEX.md")))
+        self.assertTrue(any("INDEX.md" in c for c in copied))
+
+    def test_rejected_link_reason_reaches_agent(self):
+        def nope(url):
+            raise self.vl.LinkRejected("這支影片要登入才看得到")
+        tr.fetch_link = nope
+        _, copied = tr.prepare_workspace("t2", "任務：看 https://www.facebook.com/x/videos/1")
+        self.assertTrue(any("要登入" in c for c in copied), copied)
+
+    def test_no_links_no_download(self):
+        tr.fetch_link = lambda url: self.fail("不該下載")
+        tr.prepare_workspace("t3", "任務：幫我看 https://example.com/page")
+
+
 class SafetyBoundary(unittest.TestCase):
     def test_tools_are_read_only(self):
         self.assertEqual(set(tr.TOOLS.split(",")), {"Read", "Glob", "Grep", "WebFetch"})

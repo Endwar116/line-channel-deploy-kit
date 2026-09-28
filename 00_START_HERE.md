@@ -1,7 +1,7 @@
 # LINE_CHANNEL_DEPLOY_KIT v1.0 — 從這裡開始
 
 > 這包做什麼：把一個 LINE 官方帳號變成你的 AI 值台——新機從零到通道活著 ≤ 30 分鐘。
-> 版本：KIT v1.0（2026-08-25 凍結；bridge v1.16）。全包檔案指紋見 `RELEASE_SHA256.txt`。
+> 版本：KIT v1.0（2026-08-25 凍結；bridge v1.17）。全包檔案指紋見 `RELEASE_SHA256.txt`。
 
 ## 前置（裝之前先確認三件事）
 
