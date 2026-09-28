@@ -154,6 +154,27 @@ class MainGate(unittest.TestCase):
         self.assertIn("簽章", res[0]["output"])
 
 
+class AttachmentMatching(unittest.TestCase):
+    """點名附件：檔名要完整出現，不能因為是別的檔名的一段就被帶進工作區（審查 M3）。"""
+
+    def test_full_filename(self):
+        self.assertTrue(tr.names_file("任務：看 報價單.pdf", "報價單.pdf"))
+
+    def test_stem_inside_chinese_sentence(self):
+        self.assertTrue(tr.names_file("任務：請看報價單2026版的內容", "報價單2026版.pdf"))
+
+    def test_prefix_of_longer_name_is_not_a_match(self):
+        text = "任務：讀 JOJO_IP人物定位與頻道策略_V1.0"
+        self.assertFalse(tr.names_file(text, "JOJO_IP人物定位與頻道策略.docx"))
+        self.assertTrue(tr.names_file(text, "JOJO_IP人物定位與頻道策略_V1.0.docx"))
+
+    def test_digit_continuation_is_not_a_match(self):
+        self.assertFalse(tr.names_file("任務：看 IMG_12345.jpg", "IMG_1234.jpg"))
+
+    def test_short_stem_needs_extension(self):
+        self.assertFalse(tr.names_file("任務：看合約", "合約.pdf"))
+
+
 class SafetyBoundary(unittest.TestCase):
     def test_tools_are_read_only(self):
         self.assertEqual(set(tr.TOOLS.split(",")), {"Read", "Glob", "Grep", "WebFetch"})

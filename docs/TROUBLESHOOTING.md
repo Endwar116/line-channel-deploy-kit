@@ -74,3 +74,13 @@
 
 - INDEX.md 會寫缺什麼。沒有 ffmpeg＝什麼都做不了；有 ffmpeg 沒模型＝只有畫格
 - 安裝：`brew install ffmpeg whisper-cpp`，模型 `ggml-large-v3-turbo-q5_0.bin` 放 `~/.{slug}/models/`。補裝後同一支影片會自動重做
+
+## 12. 自檢說「公網端點：找不到轉到本機 port 的公網主機名」
+
+- 自檢只認真的轉到 bridge port 的那個：cloudflared ingress 指向 `localhost:<port>` 的 hostname，或正在轉發該 port 的 Tailscale Funnel 節點
+- 用其他方式對外（或偵測不到）→ 在 `config/kit_config.json` 加 `"public_host": "你的網域"` 直接指定
+
+## 13. 自檢說「任務佇列 N 筆未收割」
+
+- 任務執行（`--with-taskrunner`）有啟用：它每 15 分鐘會自動收割，持續出現＝它停了，查 §10
+- 沒啟用：本體手動處理完佇列後跑 `python3 ~/.{slug}/tools/queue_backlog_check.py mark`，警告就會消失

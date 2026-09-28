@@ -26,6 +26,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -36,7 +37,8 @@ CFG_P = os.path.join(ROOM, "config", "kit_config.json")
 
 SERVICE_NAMES = {"linebridge": "接收站", "cloudflared": "公網入口", "taskrunner": "任務執行",
                  "healthcheck": "自檢", "calendarsync": "行程同步", "queuewatch": "佇列通知",
-                 "todopipeline": "待辦擷取", "restaurant": "餐廳收集", "backup": "備份"}
+                 "todopipeline": "待辦擷取", "restaurant": "餐廳收集", "backup": "備份",
+                 "nosleep": "防睡眠"}
 
 
 def slug_from_room(room):
@@ -59,6 +61,47 @@ def discover_services(la_dir, slug):
             short = label[len(prefix):]
             out[label] = SERVICE_NAMES.get(short, short)
     return out
+
+
+def owner_registered():
+    """認主完成＝line_owner.txt 存在。之前是安裝後的設定期：憑證空白是待辦不是故障，通知也送不出去。"""
+    return os.path.exists(os.path.join(SEC, "line_owner.txt"))
+
+
+def unharvested(rows, runner_line, queue_marker):
+    """還沒被收割的任務數。兩種收割標記任一涵蓋就算收過：
+    task_runner 的行號（自動執行）、queue_backlog_check mark 的時間戳（本體手動收割）。
+    只認其中一種的話，沒啟用任務執行的部署會永遠顯示積壓（審查 M1）。附件通知不是任務。"""
+    from datetime import datetime
+    n = 0
+    for i, r in enumerate(rows):
+        if (r.get("text") or "").startswith("【附件到達") or i < runner_line:
+            continue
+        if queue_marker is not None:
+            try:
+                if datetime.fromisoformat(r.get("ts") or "") <= queue_marker:
+                    continue
+            except (ValueError, TypeError):
+                pass                     # 時間壞掉的寧可算成未收割
+        n += 1
+    return n
+
+
+def resolve_public_host(cfg, port, cf_text, ts_status, funnel_text):
+    """找「真的轉到本機 bridge port」的公網主機名（審查 M2）。
+    順序：kit_config 的 public_host → cloudflared ingress 指向本 port 的 hostname →
+    Tailscale Funnel 正在轉發本 port 時的節點名。其他不相干的 tunnel 一律不認。"""
+    if cfg.get("public_host"):
+        return cfg["public_host"]
+    to_port = rf"(localhost|127\.0\.0\.1):{port}\b"
+    for m in re.finditer(r"hostname:\s*(\S+)\s*\n\s*service:\s*(\S+)", cf_text or ""):
+        if re.search(to_port, m.group(2)):
+            return m.group(1)
+    if ts_status and re.search(to_port, funnel_text or ""):
+        name = ((ts_status.get("Self") or {}).get("DNSName") or "").rstrip(".")
+        if name:
+            return name
+    return None
 
 
 def local_port():
@@ -111,15 +154,17 @@ def check_line_secrets():
     sec = vals.get("LINE_CHANNEL_SECRET", "")
     tok = vals.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 
+    # 還沒認主＝安裝後的設定期，空白是待辦
+    empty_lv, empty_msg = (FAIL, "空值") if owner_registered() else (WARN, "尚未填寫（安裝後的待辦步驟）")
     if not sec:
-        add(FAIL, "LINE_CHANNEL_SECRET", "空值")
+        add(empty_lv, "LINE_CHANNEL_SECRET", empty_msg)
     elif not re.fullmatch(r"[0-9a-f]{32}", sec):
         add(FAIL, "LINE_CHANNEL_SECRET", f"格式不符（應為 32 位小寫 hex，實際 {len(sec)} 字元）")
     else:
         add(OK, "LINE_CHANNEL_SECRET", "32 位 hex")
 
     if not tok:
-        add(FAIL, "LINE_CHANNEL_ACCESS_TOKEN", "空值")
+        add(empty_lv, "LINE_CHANNEL_ACCESS_TOKEN", empty_msg)
     elif len(tok) < 100:
         add(FAIL, "LINE_CHANNEL_ACCESS_TOKEN", f"長度僅 {len(tok)}，不像 LINE token")
     elif "://" in tok or "basic.ics" in tok:
@@ -322,15 +367,24 @@ def check_endpoints():
         cfg = json.load(open(CFG_P, encoding="utf-8"))
     except Exception:
         cfg = {}
-    host = cfg.get("public_host")
+    cf_text = ""
+    cf = os.path.expanduser("~/.cloudflared/config.yml")
+    if os.path.exists(cf):
+        cf_text = open(cf, encoding="utf-8").read()
+    ts_status, funnel_text = None, ""
+    ts_bin = shutil.which("tailscale") or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    if os.path.exists(ts_bin):
+        try:
+            ts_status = json.loads(subprocess.run([ts_bin, "status", "--json"], capture_output=True,
+                                                  text=True, timeout=10).stdout or "null")
+            funnel_text = subprocess.run([ts_bin, "funnel", "status"], capture_output=True,
+                                         text=True, timeout=10).stdout
+        except Exception:
+            ts_status = None
+    host = resolve_public_host(cfg, local_port(), cf_text, ts_status, funnel_text)
     if not host:
-        # 從 cloudflared 設定推斷
-        cf = os.path.expanduser("~/.cloudflared/config.yml")
-        if os.path.exists(cf):
-            m = re.search(r"hostname:\s*(\S+)", open(cf, encoding="utf-8").read())
-            host = m.group(1) if m else None
-    if not host:
-        add(WARN, "公網端點", "找不到主機名，跳過")
+        add(WARN, "公網端點", f"找不到轉到本機 port {local_port()} 的公網主機名——"
+                            "可在 config/kit_config.json 加 \"public_host\" 指定")
         return
     try:
         req = urllib.request.Request(f"https://{host}/", headers={"User-Agent": "health/1.0"})
@@ -343,22 +397,35 @@ def check_endpoints():
 
 def check_queue_backlog():
     """任務堆積代表本體沒在收割——這正是缺陷 F 的症狀。"""
+    from datetime import datetime
     q = os.path.join(ROOM, "LOG", "task_queue.jsonl")
     if not os.path.exists(q):
         return
-    n = sum(1 for l in open(q, encoding="utf-8") if l.strip())
-    marker = os.path.join(ROOM, "LOG", "task_harvest_marker.json")
-    done = 0
-    if os.path.exists(marker):
-        try:
-            done = json.load(open(marker, encoding="utf-8")).get("line", 0)
-        except Exception:
-            done = 0
-    pending = n - done
+    rows = []
+    for l in open(q, encoding="utf-8"):
+        if l.strip():
+            try:
+                rows.append(json.loads(l))
+            except Exception:
+                rows.append({})
+    runner_line = 0
+    try:
+        runner_line = json.load(open(os.path.join(ROOM, "LOG", "task_harvest_marker.json"),
+                                     encoding="utf-8")).get("line", 0)
+    except Exception:
+        pass
+    queue_marker = None
+    try:
+        queue_marker = datetime.fromisoformat(json.load(open(
+            os.path.join(ROOM, "LOG", "queue_harvest_marker.json"), encoding="utf-8"))["harvested_until"])
+    except Exception:
+        pass
+    pending = unharvested(rows, runner_line, queue_marker)
     if pending > 5:
-        add(WARN, "任務佇列", f"{pending} 筆未收割——本體可能沒在盯佇列")
+        add(WARN, "任務佇列", f"{pending} 筆未收割——本體可能沒在盯佇列"
+                              "（處理完請跑 tools/queue_backlog_check.py mark）")
     else:
-        add(OK, "任務佇列", f"共 {n} 筆，未收割 {max(pending,0)}")
+        add(OK, "任務佇列", f"共 {len(rows)} 筆，未收割 {pending}")
 
 
 def main():
@@ -383,8 +450,10 @@ def main():
     print(f"結果：{len(fails)} 項失敗、{len(warns)} 項警告、"
           f"{len(results)-len(fails)-len(warns)} 項正常")
 
-    # 有失敗才通知主人（免費路徑）
-    if fails:
+    # 有失敗才通知主人（免費路徑）；還沒認主時送不出去，不發
+    if fails and not owner_registered():
+        print("（尚未認主，不發通知）")
+    elif fails:
         lines = ["【通道】自檢發現異常，", ""]
         for _, name, detail in fails:
             lines.append(f"・{name}：{detail}")

@@ -160,6 +160,17 @@ def pick(tasks, limit):
     return out
 
 
+def names_file(text, fname):
+    """任務文字有沒有點名這個檔。完整檔名，或長於 6 字的主檔名；
+    前後不能緊接英數（避免 IMG_1234 吃到 IMG_12345、短檔名吃到較長檔名的前段）（審查 M3）。
+    中文字前後相接不算越界：「請看報價單2026版的內容」要認得。"""
+    stem = os.path.splitext(fname)[0]
+    for c in [fname] + ([stem] if len(stem) > 6 else []):
+        if re.search(r"(?<![A-Za-z0-9_])" + re.escape(c) + r"(?![A-Za-z0-9_\-])(?!\.[A-Za-z0-9])", text):
+            return True
+    return False
+
+
 def prepare_workspace(tid, task_text):
     d = os.path.join(WORKSPACE, tid)
     if os.path.exists(d):
@@ -169,8 +180,7 @@ def prepare_workspace(tid, task_text):
     if os.path.isdir(INCOMING):
         for f in os.listdir(INCOMING):
             # 只複製任務文字裡點名的檔案，不整包掛上
-            stem = os.path.splitext(f)[0]
-            if f in task_text or (len(stem) > 6 and stem in task_text):
+            if names_file(task_text, f):
                 shutil.copy2(os.path.join(INCOMING, f), os.path.join(d, f))
                 copied.append(f)
     # 影片／音檔：由這支 Python（不是 agent）先跑 video_digest，
