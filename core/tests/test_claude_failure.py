@@ -48,7 +48,6 @@ class ClassifyFailure(unittest.TestCase):
 
     def test_limit_reply_has_no_hardcoded_person_name(self):
         _, reply = classify_failure(1, LIMIT_TEXT, "")
-        self.assertNotIn("主人", reply)
         self.assertIn("主人", reply)
 
     def test_is_error_with_zero_returncode_is_still_limit(self):

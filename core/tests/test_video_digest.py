@@ -87,7 +87,8 @@ class Paths(unittest.TestCase):
         for mod in ("video_digest.py", "read_doc.py"):
             with open(os.path.join(os.path.dirname(vd.__file__), mod), encoding="utf-8") as f:
                 src = f.read()
-            self.assertNotIn(".ownerkit", src)
+            from tests.leak_rules import leaks
+            self.assertEqual(leaks(src), [])
 
 
 if __name__ == "__main__":

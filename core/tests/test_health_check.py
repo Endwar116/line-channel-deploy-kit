@@ -192,8 +192,8 @@ class SetupPhase(unittest.TestCase):
 class NoOwnerSpecifics(unittest.TestCase):
     def test_source_has_no_hardcoded_deployment(self):
         src = open(hc.__file__, encoding="utf-8").read().lower()
-        hits = [bad for bad in ("com.ownerkit", "8700/", "owner", "example") if bad in src]
-        self.assertEqual(hits, [])
+        from tests.leak_rules import leaks
+        self.assertEqual(leaks(src), [])
 
 
 if __name__ == "__main__":

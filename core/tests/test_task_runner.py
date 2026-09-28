@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import task_runner as tr  # noqa: E402
 
-OWNER_WORDS = ("ownerkit", "主人", "owner", "example", "supabase", "n8n")
+# 部署者架構專屬的平台名（不是個資，是「不該假設客戶有」的東西）
+PLATFORM_WORDS = ("supabase", "n8n")
 
 
 class Brief(unittest.TestCase):
@@ -23,9 +24,9 @@ class Brief(unittest.TestCase):
         shutil.rmtree(self.tmp)
 
     def test_default_brief_has_no_owner_specifics(self):
+        from tests.leak_rules import leaks
         low = tr.DEFAULT_BRIEF.lower()
-        for w in OWNER_WORDS:
-            self.assertNotIn(w, low)
+        self.assertEqual(leaks(low) + [w for w in PLATFORM_WORDS if w in low], [])
 
     def test_missing_file_falls_back_to_default(self):
         tr.BRIEF = os.path.join(self.tmp, "none.md")
@@ -65,8 +66,9 @@ class Prompt(unittest.TestCase):
         self.assertIn(tr.INCOMING, p)
 
     def test_source_has_no_owner_specifics(self):
+        from tests.leak_rules import leaks
         low = open(tr.__file__, encoding="utf-8").read().lower()
-        self.assertEqual([w for w in OWNER_WORDS if w in low], [])
+        self.assertEqual(leaks(low) + [w for w in PLATFORM_WORDS if w in low], [])
 
 
 class SignatureGate(unittest.TestCase):
