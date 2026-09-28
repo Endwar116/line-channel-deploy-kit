@@ -8,7 +8,7 @@
   參數未給且在互動終端 → 逐項問；非互動缺參數 → 印用法退出。
 
 做的事（全部只動 ~/.{slug}/ 與 ~/Library/LaunchAgents/，絕不碰其他目錄）：
-  1. 展開 core/ 工具 → ~/.{slug}/tools/（bridge＋claude_failure＋relay_say＋line_push＋task_verify
+  1. 展開 core/ 工具 → ~/.{slug}/tools/（bridge＋claude_failure＋line_video＋relay_say＋line_push＋task_verify
      ＋queue_backlog_check；v1.15 起加本體側 health_check＋task_runner＋read_doc＋video_digest），
      測試 → ~/.{slug}/tools/tests/（裝完可自行 unittest 覆驗）
   2. 生成 config/kit_config.json（身分參數單一真源）＋queue_hmac.key（隨機生成，600）
@@ -189,10 +189,10 @@ def selftest(base, port, launchd_loaded, ocr=("PENDING", "")):
 
     # ⑤b 本體側工具 import（v1.15）——py_compile 不解析 import，漏檔要真的 import 才會炸（缺陷 F 模式）
     tools = os.path.join(base, "tools")
-    r = subprocess.run([sys.executable, "-c", "import health_check, task_runner, read_doc, video_digest"],
+    r = subprocess.run([sys.executable, "-c", "import health_check, task_runner, read_doc, video_digest, line_video"],
                        cwd=tools, capture_output=True, text=True)
     if r.returncode == 0:
-        results.append(("本體側工具 import", "PASS", "health_check／task_runner／read_doc／video_digest"))
+        results.append(("本體側工具 import", "PASS", "health_check／task_runner／read_doc／video_digest／line_video"))
     else:
         results.append(("本體側工具 import", "FAIL", (r.stderr or "").strip().splitlines()[-1][:160]))
         hard_fail = True
@@ -255,7 +255,7 @@ def main():
     plist_p = os.path.join(plist_dir, f"com.{slug}.linebridge.plist")
 
     print(f"\n安裝計畫：owner={owner} agent={agent} slug={slug} port={port}")
-    print(f"  ① core 工具 10 支＋OCR＋測試 → {base}/tools/")
+    print(f"  ① core 工具 11 支＋OCR＋測試 → {base}/tools/")
     print(f"  ② config（kit_config.json＋queue_hmac.key＋member_alias＋attach_whitelist＋empty_mcp）")
     print(f"  ③ 身分檔 → {base}/CLAUDE.md（既有不覆蓋）；secrets 空殼 → config/secrets/（既有不覆蓋）")
     print(f"  ④ launchd → {plist_p}＋每小時自檢" + ("＋任務執行" if a.with_taskrunner else "（任務執行不啟用）")
@@ -273,7 +273,8 @@ def main():
     print("展開：")
     # claude_failure.py 是 line_bridge 的頂層 import（from claude_failure import classify_failure）。
     # 漏掉它 bridge 會 ImportError 死在啟動，不是功能降級——名單少一個檔就是整站不起來。
-    CORE_TOOLS = ("line_bridge.py", "claude_failure.py", "relay_say.py", "line_push.py",
+    # line_video.py 是 bridge 的頂層 import（v1.16），漏了 bridge 會 ImportError 死在啟動
+    CORE_TOOLS = ("line_bridge.py", "claude_failure.py", "line_video.py", "relay_say.py", "line_push.py",
                   "task_verify.py", "queue_backlog_check.py",
                   # v1.15：本體側工具（自檢、唯讀任務執行、文件／影片讀取）
                   "health_check.py", "task_runner.py", "read_doc.py", "video_digest.py")
