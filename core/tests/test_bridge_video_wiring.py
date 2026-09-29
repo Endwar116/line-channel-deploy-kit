@@ -23,11 +23,11 @@ except (SystemExit, OSError) as e:
 OWNER = "Uowner000000000000000000000000000"
 
 
-def video_event(uid=OWNER, src_type="user", extra_src=None):
+def video_event(uid=OWNER, src_type="user", extra_src=None, mtype="video"):
     src = {"type": src_type, "userId": uid}
     src.update(extra_src or {})
     return {"type": "message", "replyToken": "rt", "source": src,
-            "message": {"type": "video", "id": "m1", "contentProvider": {"type": "line"}}}
+            "message": {"type": mtype, "id": "m1", "contentProvider": {"type": "line"}}}
 
 
 @unittest.skipIf(IMPORT_ERR is not None,
@@ -93,6 +93,22 @@ class BridgeVideoWiring(unittest.TestCase):
             lb.handle_event(video_event())
         self.assertEqual(self.rows("queue.jsonl"), [])
         self.assertIn("下載失敗", self.rows("relay.jsonl")[0]["text"])
+
+    def test_owner_voice_message_is_saved_and_named_in_reply(self):
+        # 2026-09-29 實故障：主人私訊的語音被路由擋掉（只放行 S 級通道），三段語音無聲消失
+        lb.handle_event(video_event(mtype="audio"))
+        saved = os.listdir(os.path.join(self.tmp, "incoming"))
+        self.assertEqual(len(saved), 1)
+        self.assertTrue(saved[0].startswith("語音_") and saved[0].endswith(".m4a"), saved)
+        self.assertEqual(len(self.replies), 1)
+        self.assertIn(os.path.splitext(saved[0])[0], self.replies[0])   # 回覆就附上檔名
+        q = self.rows("queue.jsonl")
+        self.assertEqual(len(q), 1)
+        self.assertIn("sig", q[0])
+
+    def test_ignored_media_is_logged_not_silent(self):
+        lb.handle_event(video_event(uid="Ustranger0000000000000000000000000", mtype="audio"))
+        self.assertIn("MEDIA_IGNORED", open(os.path.join(self.tmp, "test.log"), encoding="utf-8").read())
 
     def test_stranger_video_is_ignored(self):
         lb.handle_event(video_event(uid="Ustranger0000000000000000000000000"))

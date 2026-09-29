@@ -24,6 +24,9 @@ class Naming(unittest.TestCase):
     def test_save_name_is_readable_timestamp(self):
         self.assertEqual(lv.save_name(NOW), "影片_20260928_153012.mp4")
 
+    def test_audio_save_name(self):
+        self.assertEqual(lv.save_name(NOW, "語音", ".m4a"), "語音_20260928_153012.m4a")
+
     def test_stem_is_long_enough_for_task_matching(self):
         # task_runner 點名附件要主檔名 > 6 字
         self.assertGreater(len(os.path.splitext(lv.save_name(NOW))[0]), 6)
@@ -65,6 +68,13 @@ class Receive(unittest.TestCase):
         self.assertEqual(open(path, "rb").read(), b"abc")
         self.assertEqual(size, 3)
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o444)
+
+    def test_audio_kind(self):
+        msg = {"type": "audio", "id": "a1", "contentProvider": {"type": "line"}}
+        path, _ = lv.receive(msg, self.tmp, NOW, get_status=lambda: "succeeded",
+                             open_stream=lambda: io.BytesIO(b"m4a"), sleep=lambda s: None,
+                             prefix="語音", ext=".m4a")
+        self.assertEqual(os.path.basename(path), "語音_20260928_153012.m4a")
 
     def test_same_second_gets_suffix(self):
         first, _ = self.receive(b"a")

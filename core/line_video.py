@@ -28,9 +28,9 @@ class VideoRejected(Exception):
     """不收這支影片；訊息是要講給主人聽的話。"""
 
 
-def save_name(now):
-    """影片_YYYYMMDD_HHMMSS.mp4——主人看得懂、task_runner 點名得到（主檔名 > 6 字）。"""
-    return now.strftime("影片_%Y%m%d_%H%M%S.mp4")
+def save_name(now, prefix="影片", ext=".mp4"):
+    """影片_YYYYMMDD_HHMMSS.mp4（語音用 語音_…m4a）——主人看得懂、task_runner 點名得到（主檔名 > 6 字）。"""
+    return now.strftime(f"{prefix}_%Y%m%d_%H%M%S{ext}")
 
 
 def wait_ready(get_status, sleep, timeout=TRANSCODE_TIMEOUT, interval=POLL_INTERVAL):
@@ -79,17 +79,19 @@ def download(open_stream, dest, cap=VIDEO_MAX_BYTES):
         raise
 
 
-def receive(msg, dest_dir, now, get_status, open_stream, sleep, cap=VIDEO_MAX_BYTES):
-    """收一支影片，回 (路徑, 位元組數)；不收時丟 VideoRejected。"""
+def receive(msg, dest_dir, now, get_status, open_stream, sleep, cap=VIDEO_MAX_BYTES,
+            prefix="影片", ext=".mp4"):
+    """收一支影片（或語音：prefix="語音", ext=".m4a"），回 (路徑, 位元組數)；不收時丟 VideoRejected。
+    LINE 的影片與語音都可能還在轉檔，所以兩者共用這條路。"""
     provider = (msg.get("contentProvider") or {}).get("type", "line")
     if provider != "line":
-        raise VideoRejected("這支是外部連結的影片，不是存在 LINE 上的檔案，收不到。"
-                            "請直接從手機相簿傳影片。")
+        raise VideoRejected(f"這是外部連結的{prefix}，不是存在 LINE 上的檔案，收不到。"
+                            f"請直接從手機傳{prefix}。")
     st = wait_ready(get_status, sleep)
     if st == "failed":
-        raise VideoRejected("LINE 那邊轉檔失敗，這支影片下載不了，請重傳一次。")
+        raise VideoRejected(f"LINE 那邊轉檔失敗，這段{prefix}下載不了，請重傳一次。")
     if st == "timeout":
-        raise VideoRejected("LINE 還在處理這支影片（超過 5 分鐘），請過一陣子再傳一次。")
+        raise VideoRejected(f"LINE 還在處理這段{prefix}（超過 5 分鐘），請過一陣子再傳一次。")
     os.makedirs(dest_dir, exist_ok=True)
-    dest = _free_path(dest_dir, save_name(now))
+    dest = _free_path(dest_dir, save_name(now, prefix, ext))
     return dest, download(open_stream, dest, cap)

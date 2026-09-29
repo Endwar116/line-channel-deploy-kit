@@ -92,6 +92,8 @@ def build_prompt(text, ctx, copied, brief):
 **輸出要求**
 - 直接給結果，不要說「我將要…」
 - 做不到就明說做不到，**絕對不要編造你沒做過的事**
+- 不要建議上面系統說明沒寫到的指令、參數或程式入口——你不知道它存不存在；
+  缺東西就講清楚要主人做什麼（例如重傳、在任務裡寫出檔名）
 - 需要主人決定或提供東西才能繼續，就明確說要什麼
 - 控制在 400 字內，這會被送到 LINE
 
@@ -174,24 +176,69 @@ def names_file(text, fname):
     return False
 
 
-def prepare_workspace(tid, task_text):
+MEDIA_WORDS = ("影片", "視頻", "語音", "錄音", "音檔", "聲音", "影音", "附件", "檔案")
+IMPLICIT_WINDOW = 1800          # 秒；任務前後這麼久內、同一對話收到的附件
+IMPLICIT_MAX = 3
+NAMED_FILE_RE = re.compile(r"[^\s/]+\.(pdf|docx?|xlsx?|pptx?|mp4|mov|m4v|m4a|mp3|wav|aac|jpe?g|png|heic|"
+                           r"txt|md|csv)\b", re.I)
+
+
+def implicit_attachments(rows, qidx):
+    """任務沒寫檔名、但提到影片／語音／附件：回同對話前後 IMPLICIT_WINDOW 內到的附件路徑。
+    2026-09-29 實故障：影片收下的同一秒送出「任務：將影片轉文字」，沒寫檔名，本體看不到影片。
+    大影片是下載完才排佇列，可能比任務晚到，所以前後都算。"""
+    t = rows[qidx]
+    text = t.get("text") or ""
+    if not any(w in text for w in MEDIA_WORDS) or NAMED_FILE_RE.search(text):
+        return []
+    if os.path.isdir(INCOMING) and any(names_file(text, f) for f in os.listdir(INCOMING)):
+        return []
+    try:
+        t0 = datetime.fromisoformat(t.get("ts") or "")
+    except ValueError:
+        return []
+    out = []
+    for i, r in enumerate(rows):
+        path = (r.get("attachment") or {}).get("path")
+        if i == qidx or not path or not (r.get("text") or "").startswith("【附件到達"):
+            continue
+        if r.get("channel") != t.get("channel"):
+            continue
+        try:
+            if abs((datetime.fromisoformat(r.get("ts") or "") - t0).total_seconds()) > IMPLICIT_WINDOW:
+                continue
+        except (ValueError, TypeError):
+            continue
+        out.append(path)
+    return out[-IMPLICIT_MAX:]
+
+
+def prepare_workspace(tid, task_text, extra=()):
     d = os.path.join(WORKSPACE, tid)
     if os.path.exists(d):
         shutil.rmtree(d)
     os.makedirs(d, exist_ok=True)
-    copied = []
+    copied, sources = [], {}
     if os.path.isdir(INCOMING):
         for f in os.listdir(INCOMING):
             # 只複製任務文字裡點名的檔案，不整包掛上
             if names_file(task_text, f):
                 shutil.copy2(os.path.join(INCOMING, f), os.path.join(d, f))
                 copied.append(f)
+                sources[f] = os.path.join(INCOMING, f)
+    for p in extra:
+        f = os.path.basename(p)
+        if f in sources or not os.path.exists(p):
+            continue
+        shutil.copy2(p, os.path.join(d, f))
+        copied.append(f"{f}（依任務自動帶入：同一個對話 {IMPLICIT_WINDOW // 60} 分鐘內收到的附件）")
+        sources[f] = p
     # 影片／音檔：由這支 Python（不是 agent）先跑 video_digest，
     # 把逐字稿與關鍵畫格放進工作目錄。agent 仍然只有讀取工具。
-    for f in list(copied):
+    for f, src in list(sources.items()):
         if os.path.splitext(f)[1].lower() in MEDIA_EXT:
             try:
-                out_dir, _ = digest(os.path.join(INCOMING, f))
+                out_dir, _ = digest(src)
                 dst = os.path.join(d, os.path.splitext(f)[0] + "_digest")
                 shutil.copytree(out_dir, dst)
                 copied.append(os.path.basename(dst) + "/INDEX.md（逐字稿＋畫格清單，畫格 jpg 可用 Read 看）")
@@ -212,10 +259,10 @@ def prepare_workspace(tid, task_text):
     return d, copied
 
 
-def run_one(t, idx):
+def run_one(t, idx, extra=()):
     tid = f"t{idx:04d}_" + re.sub(r"\W+", "", (t.get("ts") or ""))[-8:]
     text = t.get("text") or ""
-    ws, copied = prepare_workspace(tid, text)
+    ws, copied = prepare_workspace(tid, text, extra)
     ctx = "\n".join(f"・{c[:160]}" for c in (t.get("context") or [])[-4:])
 
     prompt = build_prompt(text, ctx, copied, load_brief())
@@ -241,6 +288,16 @@ def run_one(t, idx):
         return False, f"逾時（{TIMEOUT} 秒）"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def report(msg):
+    """用 relay_say 回報主人（免費路徑）。獨立成函式，測試才攔得住——
+    2026-09-29：驗章測試直接跑 main，在部署機上把「任務：偽造」真的送進主人 LINE 五次。"""
+    try:
+        subprocess.run([sys.executable, os.path.join(ROOM, "tools", "relay_say.py"), "-"],
+                       input=msg, text=True, timeout=30)
+    except Exception as e:
+        print(f"（回報失敗 {type(e).__name__}）")
 
 
 def main():
@@ -276,7 +333,7 @@ def main():
         label = (t.get("text") or "")[:44].replace("\n", " ")
         if ok_sig:
             print(f"── 執行 #{done+idx+1}：{label}")
-            ok, out = run_one(t, done + idx + 1)
+            ok, out = run_one(t, done + idx + 1, implicit_attachments(rows, done + idx))
         else:
             # 不執行，但照樣記錄、回報、推進標記——一筆偽造的任務不能卡住後面所有任務
             print(f"── 🔴 擋下 #{done+idx+1}：{label}（{why}）")
@@ -300,11 +357,7 @@ def main():
 
     msg = ("【本體】自動處理了 %d 筆任務。\n\n" % len(results)) + "\n\n".join(lines) + \
           "\n\n這是排程自動執行的，\n只給了讀取類工具，\n它動不了任何檔案。\n有做錯的跟我說。"
-    try:
-        subprocess.run([sys.executable, os.path.join(ROOM, "tools", "relay_say.py"), "-"],
-                       input=msg, text=True, timeout=30)
-    except Exception as e:
-        print(f"（回報失敗 {type(e).__name__}）")
+    report(msg)
     print(f"\n✓ 完成 {len(results)} 筆，收割標記推進到 {last}")
 
 

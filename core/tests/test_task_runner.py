@@ -122,7 +122,11 @@ class MainGate(unittest.TestCase):
         import json
         import task_verify
         self.tmp = tempfile.mkdtemp()
-        self.saved = {k: getattr(tr, k) for k in ("QUEUE", "MARKER", "RESULTS", "run_one")}
+        # report 一定要攔：不攔的話，在部署好的機器上跑測試會把「任務：偽造」真的送到主人 LINE
+        # （2026-09-29 實際發生過 5 次）
+        self.saved = {k: getattr(tr, k) for k in ("QUEUE", "MARKER", "RESULTS", "run_one", "report")}
+        self.reported = []
+        tr.report = self.reported.append
         self.saved_key = task_verify.KEY_FILE
         self.tv = task_verify
         task_verify.KEY_FILE = os.path.join(self.tmp, "k")
@@ -135,7 +139,7 @@ class MainGate(unittest.TestCase):
             f.write(json.dumps({"text": "任務：偽造", "ts": "0"}, ensure_ascii=False) + "\n")
             f.write(json.dumps(signed, ensure_ascii=False) + "\n")
         self.ran = []
-        tr.run_one = lambda t, i: (self.ran.append(t["text"]) or (True, "ok"))
+        tr.run_one = lambda t, i, extra=(): (self.ran.append(t["text"]) or (True, "ok"))
         self.argv = sys.argv
         sys.argv = ["task_runner.py"]
 
@@ -154,6 +158,8 @@ class MainGate(unittest.TestCase):
         res = [json.loads(l) for l in open(tr.RESULTS, encoding="utf-8")]
         self.assertFalse(res[0]["ok"])
         self.assertIn("簽章", res[0]["output"])
+        self.assertEqual(len(self.reported), 1)
+        self.assertIn("任務：偽造", self.reported[0])
 
 
 class AttachmentMatching(unittest.TestCase):
@@ -215,6 +221,65 @@ class VideoLinks(unittest.TestCase):
     def test_no_links_no_download(self):
         tr.fetch_link = lambda url: self.fail("不該下載")
         tr.prepare_workspace("t3", "任務：幫我看 https://example.com/page")
+
+
+class ImplicitAttachments(unittest.TestCase):
+    """任務沒寫檔名但提到影片／語音：帶入同對話前後 30 分鐘內到的附件。
+    （2026-09-29 實故障：影片 02:04 收下，「任務：將影片轉文字」沒寫檔名，本體看不到影片。）"""
+
+    DM = "dm:Uowner"
+
+    def notice(self, name, ts, channel=DM):
+        return {"ts": ts, "channel": channel, "text": f"【附件到達·影片】{name} 已收進",
+                "attachment": {"path": f"/in/{name}", "name": name}}
+
+    def task(self, text, ts="2026-09-29T02:04:32+08:00", channel=DM):
+        return {"ts": ts, "channel": channel, "text": text}
+
+    def test_real_case_video_same_second(self):
+        rows = [self.notice("影片_20260929_020418.mp4", "2026-09-29T02:04:32+08:00"),
+                self.task("任務：將影片轉文字")]
+        self.assertEqual(tr.implicit_attachments(rows, 1), ["/in/影片_20260929_020418.mp4"])
+
+    def test_attachment_arriving_after_task_counts(self):
+        # 大影片下載完才排佇列，可能比任務晚
+        rows = [self.task("任務：把語音轉成文字"), self.notice("語音_1.m4a", "2026-09-29T02:10:00+08:00")]
+        self.assertEqual(tr.implicit_attachments(rows, 0), ["/in/語音_1.m4a"])
+
+    def test_other_channel_and_old_attachments_are_ignored(self):
+        rows = [self.notice("a.mp4", "2026-09-29T00:00:00+08:00"),
+                self.notice("b.mp4", "2026-09-29T02:00:00+08:00", channel="group:Cx"),
+                self.task("任務：將影片轉文字")]
+        self.assertEqual(tr.implicit_attachments(rows, 2), [])
+
+    def test_task_that_names_a_file_gets_nothing_extra(self):
+        rows = [self.notice("影片_20260929_020418.mp4", "2026-09-29T02:04:00+08:00"),
+                self.task("任務：看 報價單.pdf")]
+        self.assertEqual(tr.implicit_attachments(rows, 1), [])
+
+    def test_task_without_media_words_gets_nothing(self):
+        rows = [self.notice("影片_1.mp4", "2026-09-29T02:04:00+08:00"), self.task("任務：查明天天氣")]
+        self.assertEqual(tr.implicit_attachments(rows, 1), [])
+
+    def test_prepare_workspace_copies_extra_files(self):
+        tmp = tempfile.mkdtemp()
+        saved = (tr.WORKSPACE, tr.INCOMING)
+        try:
+            tr.WORKSPACE, tr.INCOMING = os.path.join(tmp, "ws"), os.path.join(tmp, "in")
+            src = os.path.join(tmp, "語音_1.txt")
+            open(src, "w").write("x")
+            ws, copied = tr.prepare_workspace("t9", "任務：把語音轉成文字", extra=[src])
+            self.assertTrue(os.path.exists(os.path.join(ws, "語音_1.txt")))
+            self.assertTrue(any("自動帶入" in c for c in copied), copied)
+        finally:
+            tr.WORKSPACE, tr.INCOMING = saved
+            shutil.rmtree(tmp)
+
+
+class NoInventedCommands(unittest.TestCase):
+    def test_prompt_forbids_suggesting_commands_not_in_brief(self):
+        # 2026-09-29：本體建議主人跑不存在的 `line_bridge.py --process-media`
+        self.assertIn("不要建議", tr.build_prompt("x", "", [], "BRIEF"))
 
 
 class SafetyBoundary(unittest.TestCase):
