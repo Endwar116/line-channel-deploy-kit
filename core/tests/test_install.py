@@ -46,6 +46,9 @@ class CleanInstall(unittest.TestCase):
     def test_system_brief_is_created(self):
         self.assertTrue(os.path.exists(os.path.join(self.base, "config", "system_brief.md")))
 
+    def test_whisper_vocab_is_created(self):
+        self.assertTrue(os.path.exists(os.path.join(self.base, "config", "whisper_vocab.txt")))
+
     def test_shipped_tests_pass_in_install_tree(self):
         r = subprocess.run(["/usr/bin/python3", "-m", "unittest", "discover", "-s", "tests"],
                            cwd=os.path.join(self.base, "tools"), capture_output=True, text=True,

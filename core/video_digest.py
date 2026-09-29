@@ -28,6 +28,7 @@ ROOM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INCOMING = os.path.join(ROOM, "media", "incoming")
 DIGEST = os.path.join(ROOM, "media", "digest")
 MODEL = os.path.join(ROOM, "models", "ggml-large-v3-turbo-q5_0.bin")
+VOCAB = os.path.join(ROOM, "config", "whisper_vocab.txt")   # 專有名詞表，一行一個（可不存在）
 
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".3gp"}
 AUDIO_EXT = {".m4a", ".mp3", ".wav", ".aac", ".ogg", ".opus", ".flac", ".aiff", ".amr"}
@@ -43,6 +44,95 @@ def _bin(name):
 
 
 INSTALL_HINT = "brew install ffmpeg whisper-cpp；模型放 models/ggml-large-v3-turbo-q5_0.bin"
+
+# ── 專有名詞與簡轉繁（2026-09-29：「臼井靈氣」兩次被聽成「究竟靈氣」、逐字稿冒出簡體「推广」）──
+PROMPT_HEAD = "以下是繁體中文的逐字稿"
+MAX_PROMPT_CHARS = 200          # whisper 的 prompt 只吃前 ~224 token，太長的後段會被丟掉
+
+
+def load_vocab(path=None):
+    """讀專有名詞表：一行一個，# 開頭是註解。檔案不存在就是空表。"""
+    try:
+        lines = open(path or VOCAB, encoding="utf-8").read().splitlines()
+    except OSError:
+        return []
+    return [l.strip() for l in lines
+            if l.strip() and not l.strip().startswith("#") and "=>" not in l]
+
+
+def load_fixes(path=None):
+    """更正表：同一個檔裡「錯 => 對」的行。提示詞拉不回來的（臼井→究竟），轉完直接替換。"""
+    try:
+        lines = open(path or VOCAB, encoding="utf-8").read().splitlines()
+    except OSError:
+        return []
+    out = []
+    for l in lines:
+        if "=>" in l and not l.strip().startswith("#"):
+            wrong, right = (x.strip() for x in l.split("=>", 1))
+            if wrong:
+                out.append((wrong, right))
+    return out
+
+
+# whisper 在靜音／片尾音樂時會冒出訓練資料裡的字幕句——整行刪掉（9/29 實測：「優優獨播劇場」）
+HALLUCINATIONS = re.compile(r"優優獨播劇場|YoYo Television|字幕由.*提供|Amara\.org|請不吝點[讚赞]|"
+                            r"點點欄目|明鏡與點點|中文字幕志願者|字幕志愿者")
+
+
+def clean_transcript(text, fixes):
+    """套更正表、刪已知幻覺句。逐行處理，.srt 的序號與時間碼行不受影響。"""
+    out = []
+    for line in text.split("\n"):
+        if HALLUCINATIONS.search(line):
+            continue
+        for wrong, right in fixes:
+            line = line.replace(wrong, right)
+        out.append(line)
+    return "\n".join(out)
+
+
+def whisper_prompt(terms):
+    """繁體開頭讓 whisper 輸出繁體；接著列專有名詞，讓它優先認得這些詞。
+    超過 MAX_PROMPT_CHARS 就停在完整的詞，不切半個。"""
+    head = PROMPT_HEAD + "，可能提到："
+    kept = []
+    for t in terms:
+        if len(head + "、".join(kept + [t]) + "。") > MAX_PROMPT_CHARS:
+            break
+        kept.append(t)
+    return head + "、".join(kept) + "。" if kept else PROMPT_HEAD + "。"
+
+
+def whisper_args(model, wav, lang, base, prompt):
+    return [_bin("whisper-cli"), "-m", model, "-f", wav, "-l", lang,
+            "--prompt", prompt, "-otxt", "-osrt", "-of", base, "-np"]
+
+
+def to_traditional(text, opencc=None):
+    """OpenCC s2tw：只轉字形，不改用詞（講者說「視頻」就留「視頻」）。沒裝 opencc 就原樣回傳。"""
+    opencc = opencc or shutil.which("opencc") or "/opt/homebrew/bin/opencc"
+    if not text or not os.path.exists(opencc):
+        return text
+    try:
+        r = subprocess.run([opencc, "-c", "s2tw.json"], input=text, capture_output=True,
+                           text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return text
+    out = r.stdout if r.returncode == 0 else ""
+    if out.endswith("\n") and not text.endswith("\n"):
+        out = out[:-1]
+    return out or text
+
+
+def finalize_transcript(base):
+    """把 whisper 產出的 .txt／.srt 就地轉成繁體，回純文字。"""
+    for ext in (".txt", ".srt"):
+        p = base + ext
+        if os.path.exists(p):
+            s = open(p, encoding="utf-8", errors="ignore").read()
+            open(p, "w", encoding="utf-8").write(clean_transcript(to_traditional(s), load_fixes()))
+    return open(base + ".txt", encoding="utf-8", errors="ignore").read().strip()
 
 
 def missing_tools():
@@ -82,15 +172,12 @@ def transcribe(path, out_dir, lang="auto"):
         if r.returncode != 0:
             return "", f"抽音軌失敗：{r.stderr[:200]}"
         base = os.path.join(out_dir, "transcript")
-        # --prompt 用繁體開頭，whisper 輸出中文時會跟著用繁體
-        r = subprocess.run([_bin("whisper-cli"), "-m", MODEL, "-f", wav, "-l", lang,
-                            "--prompt", "以下是繁體中文的逐字稿。",
-                            "-otxt", "-osrt", "-of", base, "-np"],
+        # prompt 用繁體開頭（whisper 會跟著用繁體）＋專有名詞表
+        r = subprocess.run(whisper_args(MODEL, wav, lang, base, whisper_prompt(load_vocab())),
                            capture_output=True, text=True, timeout=WHISPER_TIMEOUT)
         if r.returncode != 0:
             return "", f"whisper 失敗 rc={r.returncode}：{r.stderr[-300:]}"
-    txt = open(base + ".txt", encoding="utf-8", errors="ignore").read().strip()
-    return txt, ""
+    return finalize_transcript(base), ""
 
 
 def extract_frames(path, out_dir, duration):

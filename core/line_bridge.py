@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from claude_failure import classify_failure   # 額度/未知失敗分類（純函式，同目錄）
 import line_video                                # v1.16 影片訊息收檔（轉檔等待／200MB／不留殘檔）
 
-VERSION = "1.18"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
+VERSION = "1.19"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
 ROOM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 

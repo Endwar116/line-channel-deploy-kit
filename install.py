@@ -335,6 +335,9 @@ def main():
     put(os.path.join(base, "config", "system_brief.md"),
         open(os.path.join(KIT, "templates", "system_brief.md.tmpl"), encoding="utf-8").read(),
         skip_if_exists=True, label="config/system_brief.md（任務執行的系統說明，請依實況改寫）")
+    put(os.path.join(base, "config", "whisper_vocab.txt"),
+        open(os.path.join(KIT, "templates", "whisper_vocab.txt.tmpl"), encoding="utf-8").read(),
+        skip_if_exists=True, label="config/whisper_vocab.txt（語音辨識的專有名詞表，請填常用名詞）")
     ocr_status, ocr_detail = build_ocr(base)
     print(f"  OCR：{ocr_status} {ocr_detail}")
 
