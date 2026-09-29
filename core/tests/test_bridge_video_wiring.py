@@ -41,6 +41,7 @@ class BridgeVideoWiring(unittest.TestCase):
             ("MEDIA_INCOMING", os.path.join(self.tmp, "incoming")),
             ("PENDING_RELAY", os.path.join(self.tmp, "relay.jsonl")),
             ("TASK_QUEUE", os.path.join(self.tmp, "queue.jsonl")),
+            ("ATTACH_INDEX", os.path.join(self.tmp, "attachments.jsonl")),   # 不攔會寫進正式附件清單
             ("S_TIER_ATTACH_OK", set()), ("ATTACH_OPEN", set()),
             ("ATTACH_OPEN_ALL_FOR_OWNER", True),
             ("send_reply", lambda tok, text: self.replies.append(text)),

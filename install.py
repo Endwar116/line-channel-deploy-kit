@@ -45,7 +45,9 @@ CORE_TOOLS = ("line_bridge.py", "claude_failure.py", "line_video.py", "relay_say
               # v1.15：本體側工具（自檢、唯讀任務執行、文件／影片讀取）
               "health_check.py", "task_runner.py", "read_doc.py", "video_digest.py", "video_link.py",
               # v1.20：約時間查忙碌時段（bridge 頂層 import）
-              "schedule_check.py")
+              "schedule_check.py",
+              # v1.21：任務要 Word 時存成 .docx（task_runner 頂層 import）
+              "docx_out.py")
 
 
 def ask(prompt, current, pattern=None, hint=""):
@@ -198,10 +200,10 @@ def selftest(base, port, launchd_loaded, ocr=("PENDING", "")):
 
     # ⑤b 本體側工具 import（v1.15）——py_compile 不解析 import，漏檔要真的 import 才會炸（缺陷 F 模式）
     tools = os.path.join(base, "tools")
-    r = subprocess.run([sys.executable, "-c", "import health_check, task_runner, read_doc, video_digest, line_video, video_link, schedule_check"],
+    r = subprocess.run([sys.executable, "-c", "import health_check, task_runner, read_doc, video_digest, line_video, video_link, schedule_check, docx_out"],
                        cwd=tools, capture_output=True, text=True)
     if r.returncode == 0:
-        results.append(("本體側工具 import", "PASS", "health_check／task_runner／read_doc／video_digest／line_video／video_link／schedule_check"))
+        results.append(("本體側工具 import", "PASS", "health_check／task_runner／read_doc／video_digest／line_video／video_link／schedule_check／docx_out"))
     else:
         results.append(("本體側工具 import", "FAIL", (r.stderr or "").strip().splitlines()[-1][:160]))
         hard_fail = True

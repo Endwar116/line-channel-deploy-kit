@@ -34,6 +34,11 @@ class FindLinks(unittest.TestCase):
                   "https://www.threads.net/@a/post/b", "https://vt.tiktok.com/x/", "http://xhslink.com/a/b"):
             self.assertEqual(vl.find_video_links(u), [u], u)
 
+    def test_xhslink_cn_share_link(self):
+        # 2026-09-20 主人實際分享的是 xhslink.cn，不是 .com
+        u = "https://xhslink.cn/o/3EKetlJGTjJ"
+        self.assertEqual(vl.find_video_links(f"任務：{u} 這裡有提示詞"), [u])
+
     def test_lookalike_host_is_not_supported(self):
         self.assertEqual(vl.find_video_links("https://facebook.com.evil.io/v"), [])
 
@@ -104,6 +109,15 @@ class Fetch(unittest.TestCase):
 
     def test_unsupported(self):
         self.assertIn("不支援", self.rejected("ERROR: Unsupported URL: https://www.facebook.com/x"))
+
+    def test_xiaohongshu_blocked_in_taiwan(self):
+        # 2026-09-30 實查：xiaohongshu.com 被導到警政署（MOI/NPA）的自簽憑證
+        with self.assertRaises(vl.LinkRejected) as cm:
+            vl.fetch("https://xhslink.cn/o/abc", self.tmp, ytdlp="/bin/echo",
+                     run=FakeYtDlp(rc=1, stderr="ERROR: [XiaoHongShu] x: Unable to download webpage: "
+                                              "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate"))
+        self.assertIn("封鎖", str(cm.exception))
+        self.assertIn("截圖", str(cm.exception))
 
     def test_other_error_is_generic_not_raw(self):
         msg = self.rejected("ERROR: something weird happened")

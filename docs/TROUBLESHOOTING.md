@@ -113,3 +113,14 @@
 - 需要 `~/.{slug}/LOG/busy_index.json`（kit 不產出；要由部署者的行程同步寫：`{"days": {"YYYY-MM-DD": [["HH:MM","HH:MM"], ...]}}`，只放時刻不放內容）
 - 訊息要同時有日期（10/7、明天、下週三…）和約的意思（約、碰面、有空、方便、可以嗎…）才會查；log 會記 `SCHEDULE_NOTE`
 - 判讀規則在 `tools/schedule_check.py`；只講「早上／下午／晚上」會當成整段時間；全天事件不算沒空
+
+## 18. 群組裡傳的檔案／圖片，助理沒反應
+
+- 設計如此（v1.21）：群組附件安靜存著，不回話、不排進本體佇列；記在 `LOG/attachments.jsonl`（log 關鍵字 `ATTACH_QUIET`）
+- 要讀：在該群組 @ 助理下任務並提到「剛剛那份／圖片／PDF」等，會帶入同群組前後 30 分鐘內的附件
+- 私訊照舊：收下即回覆檔名
+
+## 19. 任務要 Word，檔案在哪
+
+- 存在 `config/kit_config.json` 的 `output_dir`（可用 `~`；沒設＝`~/.{slug}/output/`），回覆會附檔名與位置
+- 雲端資料夾（`~/Library/CloudStorage/...`）在排程環境若沒權限，會退回本機 `output/` 並在回覆裡說明

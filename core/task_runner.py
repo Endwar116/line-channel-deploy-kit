@@ -40,11 +40,25 @@ WORKSPACE = os.path.join(ROOM, "workspace")
 INCOMING = os.path.join(ROOM, "media", "incoming")
 MCP = os.path.join(ROOM, "config", "empty_mcp.json")
 BRIEF = os.path.join(ROOM, "config", "system_brief.md")
+ATTACH_INDEX = os.path.join(ROOM, "LOG", "attachments.jsonl")   # bridge 記的附件清單（群組附件只記這裡，不進佇列）
+FALLBACK_OUTPUT = os.path.join(ROOM, "output")
+CFG_P = os.path.join(ROOM, "config", "kit_config.json")
+
+
+def output_dir():
+    """Word 輸出位置：kit_config 的 output_dir（可用 ~）與給主人看的名稱 output_label；沒設就存本機 output/。"""
+    try:
+        cfg = json.load(open(CFG_P, encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    d = os.path.expanduser(cfg.get("output_dir") or "") or FALLBACK_OUTPUT
+    return d, cfg.get("output_label") or d
 TZ = timezone(timedelta(hours=8))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from video_digest import MEDIA_EXT, digest  # noqa: E402
 from video_link import LinkRejected, find_video_links, fetch as fetch_link  # noqa: E402
+import docx_out  # noqa: E402
 
 TOOLS = "Read,Glob,Grep,WebFetch"      # 白名單：只有讀與查
 MAX_PER_RUN = 3
@@ -65,6 +79,10 @@ DEFAULT_BRIEF = """- LINE webhook 直接進 `line_bridge.py`（Python，跑在�
 - 其他系統細節這裡沒寫，就代表你不知道——不要猜。"""
 
 
+WORD_RULE = """- 這個任務要 Word 檔：系統會把你的回覆**自動存成 Word** 放進主人的資料夾。
+  直接產出要放進文件的完整內容（不受 400 字限制），不要說做不到 Word、也不要教主人自己貼"""
+
+
 def load_brief():
     try:
         s = open(BRIEF, encoding="utf-8").read()
@@ -74,7 +92,7 @@ def load_brief():
         return DEFAULT_BRIEF
 
 
-def build_prompt(text, ctx, copied, brief):
+def build_prompt(text, ctx, copied, brief, word=False):
     return f"""你是本體，正在無人看管的排程中執行一筆來自 LINE 的任務。
 
 **這套系統長什麼樣（不要猜，照這裡寫的）**
@@ -95,7 +113,7 @@ def build_prompt(text, ctx, copied, brief):
 - 不要建議上面系統說明沒寫到的指令、參數或程式入口——你不知道它存不存在；
   缺東西就講清楚要主人做什麼（例如重傳、在任務裡寫出檔名）
 - 需要主人決定或提供東西才能繼續，就明確說要什麼
-- 控制在 400 字內，這會被送到 LINE
+{WORD_RULE if word else "- 控制在 400 字內，這會被送到 LINE"}
 
 任務內容：
 {text}
@@ -176,7 +194,8 @@ def names_file(text, fname):
     return False
 
 
-MEDIA_WORDS = ("影片", "視頻", "語音", "錄音", "音檔", "聲音", "影音", "附件", "檔案")
+MEDIA_WORDS = ("影片", "視頻", "語音", "錄音", "音檔", "聲音", "影音", "附件", "檔案",
+               "圖片", "照片", "截圖", "PDF", "pdf", "文件", "那份", "這份", "剛剛傳")
 IMPLICIT_WINDOW = 1800          # 秒；任務前後這麼久內、同一對話收到的附件
 IMPLICIT_MAX = 3
 NAMED_FILE_RE = re.compile(r"[^\s/]+\.(pdf|docx?|xlsx?|pptx?|mp4|mov|m4v|m4a|mp3|wav|aac|jpe?g|png|heic|"
@@ -197,15 +216,25 @@ def implicit_attachments(rows, qidx):
         t0 = datetime.fromisoformat(t.get("ts") or "")
     except ValueError:
         return []
+    cands = [(r.get("ts"), r.get("channel"), (r.get("attachment") or {}).get("path"))
+             for i, r in enumerate(rows)
+             if i != qidx and (r.get("text") or "").startswith("【附件到達")]
+    # 群組附件（2026-09-30 起）安靜存著、不進佇列，只記在附件清單裡
+    try:
+        for l in open(ATTACH_INDEX, encoding="utf-8"):
+            try:
+                a = json.loads(l)
+                cands.append((a.get("ts"), a.get("channel"), a.get("path")))
+            except ValueError:
+                continue
+    except OSError:
+        pass
     out = []
-    for i, r in enumerate(rows):
-        path = (r.get("attachment") or {}).get("path")
-        if i == qidx or not path or not (r.get("text") or "").startswith("【附件到達"):
-            continue
-        if r.get("channel") != t.get("channel"):
+    for ts, ch, path in cands:
+        if not path or ch != t.get("channel") or path in out:
             continue
         try:
-            if abs((datetime.fromisoformat(r.get("ts") or "") - t0).total_seconds()) > IMPLICIT_WINDOW:
+            if abs((datetime.fromisoformat(ts or "") - t0).total_seconds()) > IMPLICIT_WINDOW:
                 continue
         except (ValueError, TypeError):
             continue
@@ -259,13 +288,25 @@ def prepare_workspace(tid, task_text, extra=()):
     return d, copied
 
 
+def save_word(out, task_text):
+    """把 agent 的結果存成 .docx，回覆後面附上檔名與位置。寫不進雲端就退回本機並照實說。"""
+    d, label = output_dir()
+    try:
+        path, fell_back = docx_out.save_output(out, task_text, d, datetime.now(TZ), fallback_dir=FALLBACK_OUTPUT)
+    except OSError as e:
+        return out + f"\n\n（要存成 Word 但失敗了：{type(e).__name__}，內容在上面）"
+    where = f"電腦本機 {os.path.dirname(path)}（{label} 寫不進去，先存這裡）" if fell_back else label
+    return out + f"\n\n📄 已存成 Word：{os.path.basename(path)}\n位置：{where}"
+
+
 def run_one(t, idx, extra=()):
     tid = f"t{idx:04d}_" + re.sub(r"\W+", "", (t.get("ts") or ""))[-8:]
     text = t.get("text") or ""
     ws, copied = prepare_workspace(tid, text, extra)
     ctx = "\n".join(f"・{c[:160]}" for c in (t.get("context") or [])[-4:])
 
-    prompt = build_prompt(text, ctx, copied, load_brief())
+    word = docx_out.wants_word(text)
+    prompt = build_prompt(text, ctx, copied, load_brief(), word=word)
 
     try:
         r = subprocess.run(
@@ -283,11 +324,23 @@ def run_one(t, idx, extra=()):
         if denials:
             names = ", ".join(sorted({p.get("tool_name", "?") for p in denials}))
             out += f"\n\n（它嘗試使用被禁止的工具：{names}，已被擋下）"
+        if out and word:
+            out = save_word(out, text)
         return bool(out), out or "（無輸出）"
     except subprocess.TimeoutExpired:
         return False, f"逾時（{TIMEOUT} 秒）"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+WORD_NOTE = "\n\n📄 已存成 Word："
+
+
+def line_summary(out, limit=300):
+    """回報到 LINE 的摘要：前 limit 字；有存 Word 的話，檔名那段一定要保留（它在最後面）。"""
+    body, sep, note = out.partition(WORD_NOTE)
+    head = body[:limit] + ("…（完整內容在 Word 檔）" if sep and len(body) > limit else "")
+    return head + (sep + note if sep else "")
 
 
 def report(msg):
@@ -343,7 +396,7 @@ def main():
                "queue_line": done + idx + 1, "task": t.get("text", "")[:200],
                "ok": ok, "output": out}
         results.append(rec)
-        lines.append(f"・{label}\n　{out[:300]}")
+        lines.append(f"・{label}\n　{line_summary(out)}")
 
     with open(RESULTS, "a", encoding="utf-8") as f:
         for r in results:

@@ -25,7 +25,7 @@ ROOM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LINKS_DIR = os.path.join(ROOM, "media", "links")
 
 SUPPORTED_HOSTS = ("youtube.com", "youtu.be", "facebook.com", "fb.watch", "instagram.com",
-                   "threads.net", "threads.com", "tiktok.com", "xiaohongshu.com", "xhslink.com",
+                   "threads.net", "threads.com", "tiktok.com", "xiaohongshu.com", "xhslink.com", "xhslink.cn",
                    "vimeo.com", "bilibili.com", "b23.tv", "x.com", "twitter.com")
 MAX_LINKS = 2
 MAX_MB = 200
@@ -56,8 +56,14 @@ def find_video_links(text, limit=MAX_LINKS):
     return out
 
 
-def _explain(stderr):
+def _explain(stderr, url=""):
     s = stderr.lower()
+    if "certificate_verify_failed" in s:
+        # 2026-09-30 實查：xiaohongshu.com 在台灣被導到警政署（MOI/NPA）自簽憑證的攔截頁
+        if any(h in url for h in ("xiaohongshu", "xhslink")) or "xiaohongshu" in s:
+            return ("小紅書在台灣被政府封鎖了（連線會被導到警政署的攔截頁），這台電腦抓不到。"
+                    "可以在手機上截圖或存影片，再用 LINE 傳給我。")
+        return "這個網站的連線憑證有問題（可能被封鎖或被攔截），抓不到。可以請你下載後直接用 LINE 傳給我。"
     if any(k in s for k in ("login", "log in", "sign in", "private", "cookies", "registered users",
                             "members-only", "not available")):
         return "這支影片要登入才看得到（或已設為不公開），我只抓公開影片。可以請你下載後直接用 LINE 傳影片給我。"
@@ -97,7 +103,7 @@ def fetch(url, dest_dir=LINKS_DIR, run=subprocess.run, ytdlp=None):
     if not path or not os.path.exists(path[0]):
         _cleanup(dest_dir, stem)
         # 被 match-filter 跳過時 yt-dlp 回 0 但沒有檔案
-        raise LinkRejected(_explain((r.stderr or "") + (r.stdout or "")))
+        raise LinkRejected(_explain((r.stderr or "") + (r.stdout or ""), url))
     return path[0]
 
 

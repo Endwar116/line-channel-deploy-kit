@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -229,6 +230,14 @@ class ImplicitAttachments(unittest.TestCase):
 
     DM = "dm:Uowner"
 
+    def setUp(self):
+        # 正式附件清單不能影響這組測試
+        self.saved_index = tr.ATTACH_INDEX
+        tr.ATTACH_INDEX = os.path.join(tempfile.gettempdir(), "no-such-attachments.jsonl")
+
+    def tearDown(self):
+        tr.ATTACH_INDEX = self.saved_index
+
     def notice(self, name, ts, channel=DM):
         return {"ts": ts, "channel": channel, "text": f"【附件到達·影片】{name} 已收進",
                 "attachment": {"path": f"/in/{name}", "name": name}}
@@ -274,6 +283,84 @@ class ImplicitAttachments(unittest.TestCase):
         finally:
             tr.WORKSPACE, tr.INCOMING = saved
             shutil.rmtree(tmp)
+
+
+class SilentGroupAttachments(unittest.TestCase):
+    """群組附件安靜存著，不進任務佇列；@ 助理下任務時才從附件清單帶進來（2026-09-30 主人決定）。"""
+
+    def setUp(self):
+        import json
+        self.tmp = tempfile.mkdtemp()
+        self.saved = tr.ATTACH_INDEX
+        tr.ATTACH_INDEX = os.path.join(self.tmp, "attachments.jsonl")
+        with open(tr.ATTACH_INDEX, "w", encoding="utf-8") as f:
+            for name, ts, ch in (("JOJO_準備手冊_V22.pdf", "2026-09-30T10:00:00+08:00", "group:Cjojo"),
+                                 ("圖片_20260930_100500.jpg", "2026-09-30T10:05:00+08:00", "group:Cjojo"),
+                                 ("別群.pdf", "2026-09-30T10:05:00+08:00", "group:Cother")):
+                f.write(json.dumps({"ts": ts, "channel": ch, "path": f"/in/{name}", "name": name},
+                                   ensure_ascii=False) + "\n")
+
+    def tearDown(self):
+        tr.ATTACH_INDEX = self.saved
+        shutil.rmtree(self.tmp)
+
+    def test_group_task_picks_silent_attachments_from_same_group(self):
+        rows = [{"ts": "2026-09-30T10:10:00+08:00", "channel": "group:Cjojo",
+                 "text": "@昱捷助理 任務：讀剛剛那份 PDF 跟截圖"}]
+        self.assertEqual(tr.implicit_attachments(rows, 0),
+                         ["/in/JOJO_準備手冊_V22.pdf", "/in/圖片_20260930_100500.jpg"])
+
+    def test_picture_words_count(self):
+        rows = [{"ts": "2026-09-30T10:10:00+08:00", "channel": "group:Cjojo", "text": "任務：把圖片的字抄出來"}]
+        self.assertIn("/in/圖片_20260930_100500.jpg", tr.implicit_attachments(rows, 0))
+
+
+class WordOutput(unittest.TestCase):
+    """任務要 Word：本體照樣只產文字，task_runner 存成 .docx 放進指定資料夾，回覆附檔名。"""
+
+    def setUp(self):
+        import json
+        self.tmp = tempfile.mkdtemp()
+        self.saved = {k: getattr(tr, k) for k in ("output_dir", "FALLBACK_OUTPUT", "WORKSPACE", "INCOMING")}
+        tr.output_dir = lambda: (os.path.join(self.tmp, "drive"), "Google 雲端／昱捷助理輸出")
+        tr.FALLBACK_OUTPUT = os.path.join(self.tmp, "local")
+        tr.WORKSPACE = os.path.join(self.tmp, "ws")
+        tr.INCOMING = os.path.join(self.tmp, "in")
+        fake = json.dumps({"result": "# 提示詞\n第一條", "permission_denials": []})
+        p = unittest.mock.patch.object(tr.subprocess, "run",
+                                       return_value=unittest.mock.Mock(returncode=0, stdout=fake, stderr=""))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(tr, k, v)
+        shutil.rmtree(self.tmp)
+
+    def test_prompt_tells_agent_word_is_handled(self):
+        p = tr.build_prompt("任務：貼成word檔", "", [], "BRIEF", word=True)
+        self.assertIn("Word", p)
+        self.assertIn("不要說做不到", p)
+
+    def test_word_task_saves_docx_and_reports_name(self):
+        ok, out = tr.run_one({"text": "任務：把提示詞貼成word檔", "ts": "t"}, 1)
+        self.assertTrue(ok)
+        files = os.listdir(os.path.join(self.tmp, "drive"))
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0].endswith(".docx"))
+        self.assertIn(files[0], out)
+        self.assertIn("Google 雲端／昱捷助理輸出", out)
+
+    def test_line_summary_keeps_word_note_after_truncation(self):
+        out = "字" * 2000 + "\n\n📄 已存成 Word：a.docx\n位置：Google 雲端"
+        summ = tr.line_summary(out)
+        self.assertLess(len(summ), 500)
+        self.assertIn("a.docx", summ)
+        self.assertIn("Google 雲端", summ)
+
+    def test_plain_task_saves_nothing(self):
+        tr.run_one({"text": "任務：講重點", "ts": "t"}, 2)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "drive")))
 
 
 class NoInventedCommands(unittest.TestCase):
