@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 KIT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-NEW_TOOLS = ("health_check.py", "task_runner.py", "read_doc.py", "video_digest.py", "line_video.py", "video_link.py")
+NEW_TOOLS = ("health_check.py", "task_runner.py", "read_doc.py", "video_digest.py", "line_video.py", "video_link.py", "schedule_check.py")
 
 
 def run_install(home, extra_env=None):
@@ -54,6 +54,28 @@ class CleanInstall(unittest.TestCase):
                            cwd=os.path.join(self.base, "tools"), capture_output=True, text=True,
                            env=dict(os.environ, HOME=self.home), timeout=600)
         self.assertIn("OK", r.stderr[-300:], r.stderr[-1500:])
+
+
+class ShippedImports(unittest.TestCase):
+    """出貨工具 import 的同目錄模組，都要在安裝器的出貨名單裡。
+    claude_failure、line_video、video_link、schedule_check 都漏過（缺陷 F 模式：
+    py_compile 報綠、import 才炸），第四次起改由這個測試直接擋。"""
+
+    def test_every_local_import_is_shipped(self):
+        import re
+        sys.path.insert(0, KIT)
+        import install
+        core = os.path.join(KIT, "core")
+        local = {f[:-3] for f in os.listdir(core) if f.endswith(".py")}
+        shipped = {f[:-3] for f in install.CORE_TOOLS}
+        missing = []
+        for f in install.CORE_TOOLS:
+            src = open(os.path.join(core, f), encoding="utf-8").read()
+            for m in re.finditer(r"^\s*(?:from\s+(\w+)\s+import|import\s+(\w+))", src, re.M):
+                mod = m.group(1) or m.group(2)
+                if mod in local and mod not in shipped:
+                    missing.append(f"{f} → {mod}")
+        self.assertEqual(missing, [])
 
 
 class PlistTemplates(unittest.TestCase):

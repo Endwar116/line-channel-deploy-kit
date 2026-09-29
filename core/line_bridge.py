@@ -39,8 +39,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from claude_failure import classify_failure   # 額度/未知失敗分類（純函式，同目錄）
 import line_video                                # v1.16 影片訊息收檔（轉檔等待／200MB／不留殘檔）
+import schedule_check                            # v1.20 約時間→查忙碌時段表（無表＝不作用）
 
-VERSION = "1.19"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
+VERSION = "1.20"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
 ROOM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -75,7 +76,8 @@ TASK_QUEUE = os.path.join(ROOM, "LOG", "task_queue.jsonl")   # 「任務：」�
 TOKEN_METER = os.path.join(ROOM, "LOG", "token_meter.jsonl")   # v1.8 訪客任務#1（成員）：每次 CLI spawn 計量
 CHATS_DIR = os.path.join(ROOM, "chats")   # v1.3 通道隔離：每個通道一個目錄＝獨立對話記憶（防私訊內容漏進群組）
 QUEUE_KEY_FILE = os.path.join(ROOM, "config", "secrets", "queue_hmac.key")  # v1.6 任務封包簽章鍵（外部安全審查 review #2）
-PENDING_RELAY = os.path.join(ROOM, "LOG", "pending_relay.jsonl")   # v1.11 待轉達佇列（省 push）
+PENDING_RELAY = os.path.join(ROOM, "LOG", "pending_relay.jsonl")
+BUSY_INDEX = os.path.join(ROOM, "LOG", "busy_index.json")   # v1.20 忙碌時段表（部署者的行程同步產出；只有時間沒有內容）   # v1.11 待轉達佇列（省 push）
 REPLY_GRACE = 45          # v1.11 讓渡 replyToken 後的保底秒數（LINE token 時效約 60s）
 MAX_BODY = 200_000        # v1.6 body 上限（防 memory exhaustion）
 RATE_LIMIT_PER_MIN = 30   # v1.6 每 uid 每分鐘訊息上限（防洪）
@@ -764,6 +766,18 @@ def attach_reject_log(uid, mtype, fname, reason, mid):
     log(f"ATTACH_REJECTED {reason} {uid[:8]} {fname!r}")
 
 
+def schedule_note(text, unread):
+    """v1.20：訊息在約時間時，附上那個時段有沒有安排（給值台判斷，不給對方看）。
+    群組裡約時間的話常在前一則，@值台 的那則只寫「可以嗎」，所以一併看最近 3 則。"""
+    try:
+        busy = schedule_check.load_busy(BUSY_INDEX)
+        return schedule_check.check("\n".join(list(unread)[-3:] + [text]),
+                                    schedule_check.today_tw(), busy)
+    except Exception as e:
+        log(f"SCHEDULE_NOTE_FAILED {type(e).__name__}: {e}")
+        return ""
+
+
 def relay_append(channel, text, prefix="rl"):
     """掛待轉達（免費）：該通道下一班本來就要發的 reply 帶出。"""
     with open(PENDING_RELAY, "a", encoding="utf-8") as f:
@@ -1133,6 +1147,10 @@ def handle_event(ev):
     if unread:
         prompt = "（以下是這個通道自你上次已讀後的對話紀錄，先讀完再回）\n" + \
                  "\n".join(unread) + f"\n（紀錄結束）\n\n本次對你說：{text}"
+    _sched = schedule_note(text, unread)
+    if _sched:
+        prompt += "\n\n" + _sched
+        log(f"SCHEDULE_NOTE {ctype}:{cid[:12]} {_sched.count(chr(10))} 行")
     # v1.11 待轉達注入（省 push 的核心）：本體有話要帶給主人時，不自己 push，
     # 而是掛進佇列，由分身「下一次本來就要發的 reply」順路帶出去——reply 免費且無限。
     _relay = take_pending_relay(f"{ctype}:{cid}")

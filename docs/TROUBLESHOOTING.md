@@ -107,3 +107,9 @@
 - 簡體字：`brew install opencc` 後自動轉繁（只轉字形，不改用詞）
 - 片尾冒出「字幕由…提供」「優優獨播劇場」這類：whisper 在靜音時的幻覺，已知句型會自動刪除；遇到新的句型加進 `video_digest.py` 的 `HALLUCINATIONS`
 - 改完只對新檔生效；舊檔要重轉：`python3 ~/.{slug}/tools/video_digest.py <檔案> --force`
+
+## 17. 有人約時間，值台沒說「已有安排」
+
+- 需要 `~/.{slug}/LOG/busy_index.json`（kit 不產出；要由部署者的行程同步寫：`{"days": {"YYYY-MM-DD": [["HH:MM","HH:MM"], ...]}}`，只放時刻不放內容）
+- 訊息要同時有日期（10/7、明天、下週三…）和約的意思（約、碰面、有空、方便、可以嗎…）才會查；log 會記 `SCHEDULE_NOTE`
+- 判讀規則在 `tools/schedule_check.py`；只講「早上／下午／晚上」會當成整段時間；全天事件不算沒空
