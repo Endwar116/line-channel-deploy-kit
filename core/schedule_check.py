@@ -35,6 +35,8 @@ MONTH_DAY = re.compile(r"(?<!\d)(\d{1,2})\s*[/月]\s*(\d{1,2})(?!\d)\s*[日號�
 DAY_ONLY = re.compile(r"(?<![\d/月])(\d{1,2})\s*[號号]")
 REL_DAY = re.compile(r"大後天|後天|明天|今天")
 WEEKDAY_RE = re.compile(r"((?:下)*)(?:週|星期|禮拜|周)([一二三四五六日天])")
+WEEKEND_RE = re.compile(r"((?:下)*)這?(?:週末|周末)")
+BOT_LINE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?【")     # 值台／本體／通道的發言一律【】開頭
 CLOCK = re.compile(r"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{2})")
 DEGREE = re.compile(r"[早晚快慢多少好]一點|一點點")      # 「早一點」是程度，不是一點鐘
 CN_CLOCK = re.compile(r"([一二兩三四五六七八九十]{1,3}|\d{1,2})\s*點\s*(半|[一二三四五]十分?|\d{1,2}\s*分?)?")
@@ -85,6 +87,12 @@ def find_dates(text, today):
         if k == 0 and d < today:
             d += timedelta(days=7)
         found.append(d)
+    for m in WEEKEND_RE.finditer(text):
+        k = len(m.group(1))
+        sat = today - timedelta(days=today.weekday()) + timedelta(days=7 * k + 5)
+        if k == 0 and sat + timedelta(days=1) < today:
+            sat += timedelta(days=7)
+        found += [sat, sat + timedelta(days=1)]
     out = []
     for d in found:
         if d and d not in out:
@@ -139,9 +147,19 @@ def _fmt(mins):
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
 
-def check(text, today, busy, horizon_days=HORIZON_DAYS):
-    """回給值台的系統附註；不需要查就回空字串。"""
-    if busy is None or not any(w in text for w in INTENT_WORDS):
+def check(text, today, busy, horizon_days=HORIZON_DAYS, context=()):
+    """回給值台的系統附註；不需要查就回空字串。
+    context＝最近幾則對話（群組裡約時間的話常在前一則）。2026-09-30 實故障：值台自己的回覆
+    （「週四、週五上午看起來有空」）被當成有人在約，之後主人打什麼都觸發。所以：
+      ・前文只看人講的話（【】開頭的是值台／本體／通道，排除）
+      ・本次訊息本身要有日期或約的字眼才查"""
+    if busy is None:
+        return ""
+    if not (any(w in text for w in INTENT_WORDS) or find_dates(text, today)):
+        return ""
+    human = [c for c in context if not BOT_LINE.match(c)][-3:]
+    text = "\n".join(human + [text])
+    if not any(w in text for w in INTENT_WORDS):
         return ""
     dates = find_dates(text, today)
     if not dates:

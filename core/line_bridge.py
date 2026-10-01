@@ -41,7 +41,7 @@ from claude_failure import classify_failure   # 額度/未知失敗分類（純�
 import line_video                                # v1.16 影片訊息收檔（轉檔等待／200MB／不留殘檔）
 import schedule_check                            # v1.20 約時間→查忙碌時段表（無表＝不作用）
 
-VERSION = "1.21"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
+VERSION = "1.22"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
 ROOM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -772,8 +772,7 @@ def schedule_note(text, unread):
     群組裡約時間的話常在前一則，@值台 的那則只寫「可以嗎」，所以一併看最近 3 則。"""
     try:
         busy = schedule_check.load_busy(BUSY_INDEX)
-        return schedule_check.check("\n".join(list(unread)[-3:] + [text]),
-                                    schedule_check.today_tw(), busy)
+        return schedule_check.check(text, schedule_check.today_tw(), busy, context=list(unread))
     except Exception as e:
         log(f"SCHEDULE_NOTE_FAILED {type(e).__name__}: {e}")
         return ""

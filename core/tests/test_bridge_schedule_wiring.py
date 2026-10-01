@@ -50,6 +50,16 @@ class BridgeScheduleWiring(unittest.TestCase):
         n = lb.schedule_note("@值台 可以嗎", ["[成員] 下週二晚上七點碰面？"])
         self.assertIn("已有安排", n)
 
+    def test_bot_own_reply_in_context_does_not_trigger(self):
+        # 2026-09-30 實故障：值台前一則回「這週空檔很少，今天已滿。週四、週五上午看起來有一些」，
+        # 之後主人在私訊打打卡規則的工作筆記，也被附上行程查詢
+        ctx = ["[昱捷助理] 【昱捷助理】這週空檔很少，今天已滿。\n\n週四、週五上午看起來有空，要約可以先排那兩天"]
+        self.assertEqual(lb.schedule_note("超過10分鐘不能補打卡\n超過第三次扣全勤", ctx), "")
+
+    def test_current_message_must_carry_date_or_intent(self):
+        ctx = ["[成員] 下週二晚上七點碰面？"]
+        self.assertEqual(lb.schedule_note("好喔收到", ctx), "")
+
     def test_plain_chat_gets_nothing(self):
         self.assertEqual(lb.schedule_note("今天天氣不錯", []), "")
 

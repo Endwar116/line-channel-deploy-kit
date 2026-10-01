@@ -37,6 +37,10 @@ class Dates(unittest.TestCase):
         self.assertEqual(self.d("下週二"), [date(2026, 10, 6)])
         self.assertEqual(self.d("下禮拜三"), [date(2026, 10, 7)])
 
+    def test_weekend(self):
+        self.assertEqual(self.d("週末呢？"), [date(2026, 10, 3), date(2026, 10, 4)])
+        self.assertEqual(self.d("下週末可以約嗎"), [date(2026, 10, 10), date(2026, 10, 11)])
+
     def test_day_only(self):
         self.assertEqual(self.d("6號可以嗎"), [date(2026, 10, 6)])        # 這個月的 6 號已過→下個月
 
