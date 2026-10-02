@@ -41,7 +41,7 @@ from claude_failure import classify_failure   # 額度/未知失敗分類（純�
 import line_video                                # v1.16 影片訊息收檔（轉檔等待／200MB／不留殘檔）
 import schedule_check                            # v1.20 約時間→查忙碌時段表（無表＝不作用）
 
-VERSION = "1.22"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
+VERSION = "1.23"   # 盤點 D3 修：版本單一真源（docstring/祖檔頭行引用此值）
 ROOM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -78,7 +78,9 @@ CHATS_DIR = os.path.join(ROOM, "chats")   # v1.3 通道隔離：每個通道一�
 QUEUE_KEY_FILE = os.path.join(ROOM, "config", "secrets", "queue_hmac.key")  # v1.6 任務封包簽章鍵（外部安全審查 review #2）
 PENDING_RELAY = os.path.join(ROOM, "LOG", "pending_relay.jsonl")
 BUSY_INDEX = os.path.join(ROOM, "LOG", "busy_index.json")
-ATTACH_INDEX = os.path.join(ROOM, "LOG", "attachments.jsonl")   # v1.21 所有落盤附件的清單（群組附件只記這裡）   # v1.20 忙碌時段表（部署者的行程同步產出；只有時間沒有內容）   # v1.11 待轉達佇列（省 push）
+ATTACH_INDEX = os.path.join(ROOM, "LOG", "attachments.jsonl")
+LINE_NAMES = os.path.join(ROOM, "LOG", "line_names.json")   # v1.23 未登記成員的 LINE 顯示名稱快取
+LINE_NAME_TTL = 7 * 86400   # v1.21 所有落盤附件的清單（群組附件只記這裡）   # v1.20 忙碌時段表（部署者的行程同步產出；只有時間沒有內容）   # v1.11 待轉達佇列（省 push）
 REPLY_GRACE = 45          # v1.11 讓渡 replyToken 後的保底秒數（LINE token 時效約 60s）
 MAX_BODY = 200_000        # v1.6 body 上限（防 memory exhaustion）
 RATE_LIMIT_PER_MIN = 30   # v1.6 每 uid 每分鐘訊息上限（防洪）
@@ -340,7 +342,47 @@ def now_iso():
 MEMBER_ALIAS = os.path.join(ROOM, "config", "member_alias.json")
 
 
-def display_name(uid, is_owner):
+def _fetch_line_name(uid, ctype, cid):
+    """向 LINE 查顯示名稱（群組用群組成員 API，私訊用 profile API）；查不到回 None。"""
+    try:
+        token = load_secrets()["LINE_CHANNEL_ACCESS_TOKEN"]
+        if ctype == "group":
+            url = f"https://api.line.me/v2/bot/group/{cid}/member/{uid}"
+        elif ctype == "room":
+            url = f"https://api.line.me/v2/bot/room/{cid}/member/{uid}"
+        else:
+            url = f"https://api.line.me/v2/bot/profile/{uid}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return (json.loads(r.read().decode("utf-8")).get("displayName") or "").strip() or None
+    except Exception as e:
+        log(f"LINE_NAME_LOOKUP_FAILED {uid[:8]} {type(e).__name__}")
+        return None
+
+
+def line_name(uid, ctype, cid):
+    """LINE 顯示名稱，快取 LINE_NAME_TTL；查不到也快取（一天），免得每則訊息都打 API。"""
+    try:
+        cache = json.load(open(LINE_NAMES, encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    hit = cache.get(uid)
+    now = time.time()
+    if hit and now - hit.get("at", 0) < (LINE_NAME_TTL if hit.get("name") else 86400):
+        return hit.get("name")
+    name = _fetch_line_name(uid, ctype, cid)
+    cache[uid] = {"name": name, "at": now}
+    try:
+        tmp = LINE_NAMES + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+        os.replace(tmp, LINE_NAMES)
+    except OSError:
+        pass
+    return name
+
+
+def display_name(uid, is_owner, ctype=None, cid=None):
     """說話者顯示名（2026-08-20 加）——事故：S 級通道（群組長官在場）裡，
     分身看到 `[成員Uac39d]` 卻用前文脈絡假設是主人，對長官說了「主人你好」。
     根因不是他不小心，是**我們只給了他一個無意義的代號**。真名由本體維護於
@@ -355,6 +397,11 @@ def display_name(uid, is_owner):
             return alias[uid]
     except (OSError, json.JSONDecodeError):
         pass
+    # v1.23（主人 2026-10-03 交辦）：沒登記的改用 LINE 顯示名稱，不再只給 UID 代號。
+    # 暱稱是對方自己取的，不等於核實身分——提醒照留。
+    name = line_name(uid, ctype, cid) if ctype else None
+    if name:
+        return f"{name}（LINE 名稱，身分未登記，**不要假設他是誰，需要時直接問**）"
     return f"成員{uid[:6]}（身分未登記，**不要假設他是誰，需要時直接問**）"
 
 
@@ -1106,7 +1153,7 @@ def handle_event(ev):
         log(f"RATE_LIMITED {ctype}:{uid[:8]}")
         return
     # v1.4 全量旁聽：先入 history（任何人、任何通道），再決定要不要出聲
-    log_history(ctype, cid, uid, text, who=display_name(uid, is_owner))
+    log_history(ctype, cid, uid, text, who=display_name(uid, is_owner, ctype, cid))
     # 私訊：非主人＝已讀不回（照舊，零 token）
     if ctype == "dm" and not is_owner:
         log(f"IGNORED_STRANGER dm:{uid} {text[:40]!r}")
